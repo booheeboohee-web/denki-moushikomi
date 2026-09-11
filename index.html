@@ -1272,13 +1272,17 @@ function stampCircle(txt, half) {
   }
   return new fabric.Group(parts, { originX:"center", originY:"center" });
 }
+/* 箱スタンプ：文字の幅を測って、枠線に重ならない大きさの箱にする（w は最小幅） */
 function stampBox(txt, w, h) {
-  w *= K; h *= K;
+  const minW = w * K; h *= K;
+  const text = new fabric.Text(txt, { fontSize: h * 0.52, fontFamily: '"Hiragino Sans",sans-serif',
+                                      fill: "#111", originX:"center", originY:"center", left:0, top:0 });
+  const pad = h * 0.35;                                   // 文字と枠線のすき間
+  const bw = Math.max(minW, text.width + pad * 2);
   return new fabric.Group([
-    new fabric.Rect({ width: w, height: h, fill: "#fff", stroke: "#111", strokeWidth: 2.4,
-                      left:-w/2, top:-h/2, originX:"left", originY:"top" }),
-    new fabric.Text(txt, { fontSize: h * 0.55, fontFamily: '"Hiragino Sans",sans-serif',
-                      fill: "#111", originX:"center", originY:"center", left:0, top:0 })
+    new fabric.Rect({ width: bw, height: h, fill: "#fff", stroke: "#111", strokeWidth: 2.4,
+                      left:-bw/2, top:-h/2, originX:"left", originY:"top" }),
+    text
   ], { originX:"center", originY:"center" });
 }
 function stampTriangle() {
@@ -1338,14 +1342,17 @@ function stampBranch(amp) {
   ], { originX:"center", originY:"center" });
 }
 /* 負荷：丸の中に名称と容量（スペースで改行） */
+/* 負荷：丸の中に名称と容量（スペースで改行）。文字が収まる半径にする */
 function stampLoad(txt) {
-  const r = 15 * K;
   const lines = String(txt).trim().split(/\s+/).join("\n");
+  const text = new fabric.Text(lines, { fontSize: 7.5*K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
+                        originX:"center", originY:"center", left:0, top:0, textAlign:"center", lineHeight:1.05 });
+  // 文字の外接矩形の対角線の半分＋余白が、円に収まる最小半径
+  const r = Math.max(15 * K, Math.hypot(text.width, text.height) / 2 + 3 * K);
   return new fabric.Group([
     new fabric.Circle({ radius:r, fill:"#fff", stroke:"#111", strokeWidth:2.4,
                         left:-r, top:-r, originX:"left", originY:"top" }),
-    new fabric.Text(lines, { fontSize: 7.5*K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
-                        originX:"center", originY:"center", left:0, top:0, textAlign:"center", lineHeight:1.05 })
+    text
   ], { originX:"center", originY:"center" });
 }
 /* 白で隠す：地図の余計な情報（文字の跡など）を覆う。枠線は付けない（画面でも出力でも真っ白）。

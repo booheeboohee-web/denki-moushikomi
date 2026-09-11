@@ -1,0 +1,2391 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>電気使用申込書メーカー（東北電力・従量電灯B）</title>
+<!-- iPadの「ホーム画面に追加」用。standalone にはしない（Safariのまま開く方がPDF保存・共有が確実） -->
+<meta name="apple-mobile-web-app-title" content="電気申込書">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="apple-touch-icon.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+:root{
+  --bg:#eef1f5; --panel:#fff; --line:#d3d9e2; --ink:#1b2430; --sub:#5b6675;
+  --accent:#0b6bcb; --accent2:#e8f1fc; --warn:#c62828; --ok:#2e7d32;
+  --tap:46px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+  background:var(--bg); color:var(--ink); overflow:hidden;
+  font-size:15px; -webkit-text-size-adjust:100%;
+}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+
+/* ---------- layout ---------- */
+#app{display:flex;flex-direction:column;height:100dvh}
+header{
+  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  background:#fff;border-bottom:1px solid var(--line);flex:0 0 auto;
+  padding-top:calc(8px + env(safe-area-inset-top));
+  overflow:hidden;                 /* ヘッダー自体は絶対に溢れさせない */
+}
+/* タイトルと様式バッジは、幅が足りなくなったら先に縮む・消える。
+   ステップ切替は最後まで残して、横スクロールで全部に届くようにする。 */
+header h1{
+  font-size:15px;margin:0;font-weight:700;white-space:nowrap;
+  flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis
+}
+.formname{
+  font-size:11.5px;color:var(--sub);background:#eef4fb;border:1px solid #cfe0f3;
+  border-radius:999px;padding:3px 9px;white-space:nowrap;
+  flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis
+}
+header .sp{flex:0 1 0;min-width:0}
+#steps{
+  display:flex;gap:4px;
+  flex:1 1 auto;min-width:0;          /* ← 縮めるようにして初めて中のスクロールが効く */
+  overflow-x:auto;overflow-y:hidden;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;               /* つまみは隠してスワイプで送る */
+  padding-bottom:2px;
+  /* scroll-snap は付けない。付けると「選択中を画面内に送る」処理が
+     スナップ点に引き戻されて効かなくなる。 */
+}
+#steps::-webkit-scrollbar{display:none}
+#steps button{
+  border:1px solid var(--line);background:#fff;border-radius:999px;
+  padding:0 14px;height:34px;white-space:nowrap;font-size:13px;color:var(--sub);
+  flex:0 0 auto
+}
+#steps button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+#btnReload{flex:0 0 auto}
+/* 幅が足りなくなったら、まずアプリ名、次に様式バッジを外して
+   ステップ切替に幅を回す（iPad縦=768pxで4つとも収まるようにする）。 */
+@media (max-width:960px){ .formname{max-width:150px} }
+@media (max-width:820px){ header h1{display:none} }
+@media (max-width:600px){ .formname{display:none} }
+#main{flex:1;display:flex;min-height:0}
+/* ツールバーはキャンバスの外に置く。#stage の中に入れると、拡大して
+   横スクロールしたときに一緒に流れて画面外へ出てしまう。 */
+/* min-height:0 が要る。既定の min-height:auto だとツールバー＋キャンバスの
+   高さぶんだけ縮まず、下にある入力パネルを画面外へ押し出してしまう。 */
+#stagewrap{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+#stage{flex:1;min-height:0;min-width:0;background:#8b95a3;overflow:auto;-webkit-overflow-scrolling:touch}
+/* justify-content:center は、中身がはみ出したとき左（上）側がスクロールで
+   到達できなくなる。margin:auto なら小さいときは中央、大きいときは端まで届く。 */
+#stageInner{padding:16px;display:flex;min-height:100%}
+/* flex:0 0 auto が要る。既定の flex-shrink:1 のままだと、拡大したとき
+   枠だけが画面幅まで縮んでしまい、中のキャンバスがはみ出して
+   左右どちらにもスクロールで届かなくなる。 */
+#cwrap{position:relative;box-shadow:0 6px 30px rgba(0,0,0,.35);background:#fff;
+  margin:auto;flex:0 0 auto}
+#side{
+  flex:0 0 380px;background:var(--panel);border-left:1px solid var(--line);
+  overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 60px;
+}
+@media (max-width:1000px){
+  #main{flex-direction:column}
+  #side{flex:0 0 46%;border-left:none;border-top:1px solid var(--line)}
+}
+
+/* ---------- toolbar over canvas ---------- */
+#tools{display:flex;gap:6px;flex-wrap:wrap;padding:8px 10px;background:rgba(255,255,255,.96);border-bottom:1px solid var(--line);flex:0 0 auto}
+#tools button{
+  min-width:var(--tap);height:var(--tap);border:1px solid var(--line);background:#fff;
+  border-radius:10px;padding:0 10px;font-size:13px;display:inline-flex;
+  align-items:center;justify-content:center;gap:5px;
+}
+#tools button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+#tools .grp{display:flex;gap:6px;padding-right:8px;border-right:1px solid var(--line)}
+#tools .grp:last-child{border-right:none}
+#tools label{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:5px}
+#tools .grplabel{font-size:11px;color:var(--sub);align-self:center;padding-right:2px}
+/* 狭い画面ではツールバーを折り返さず横スクロールにする。
+   折り返すと6段になって画面の3割を占めてしまう。 */
+@media (max-width:760px){
+  #tools{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+  #tools::-webkit-scrollbar{display:none}
+  #tools>*{flex:0 0 auto}
+  #tools button{min-width:40px;height:40px;font-size:12px;padding:0 9px}
+  #tools label{white-space:nowrap}
+}
+
+
+/* ---------- side panel ---------- */
+.card{border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden;background:#fff}
+.card>h3{
+  margin:0;padding:10px 12px;background:#f6f8fb;font-size:13px;font-weight:700;
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:6px
+}
+.card>.body{padding:12px}
+.f{margin-bottom:12px}
+.f>label{display:block;font-size:12px;color:var(--sub);margin-bottom:4px;font-weight:600}
+.f input[type=text],.f input[type=tel],.f textarea,.f select{
+  width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;
+  min-height:var(--tap)
+}
+.f textarea{min-height:80px;resize:vertical}
+.f .row{display:flex;gap:6px;align-items:center}
+.f .row input{flex:1;min-width:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips button{
+  border:1px solid var(--line);background:#fff;border-radius:9px;
+  min-height:var(--tap);padding:0 13px;font-size:14px
+}
+.chips button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+.chips.sm button{min-height:38px;font-size:13px;padding:0 10px}
+.prevbox{position:relative;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#e8eaee}
+.prevbox canvas{display:block;width:100%;height:auto;touch-action:none;cursor:grab}
+.prevbox canvas:active{cursor:grabbing}
+.prevtip{position:absolute;left:6px;bottom:6px;background:rgba(27,36,48,.72);color:#fff;
+  font-size:11px;padding:2px 7px;border-radius:6px;pointer-events:none}
+.nudge{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px}
+.nudge .btn{min-height:40px;font-size:17px;padding:0}
+.stampgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:7px}
+.stampgrid button{
+  border:1px solid var(--line);background:#fff;border-radius:10px;height:58px;
+  font-size:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px
+}
+.stampgrid button b{font-size:17px;font-weight:700;line-height:1}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--line);background:#fff;border-radius:10px;
+  min-height:var(--tap);padding:0 15px;font-size:14px
+}
+.btn.p{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+.btn.d{background:#fff;border-color:var(--warn);color:var(--warn)}
+.btn.w{width:100%}
+.hint{font-size:11.5px;color:var(--sub);line-height:1.6;margin:6px 0 0}
+.hint.warn{color:var(--warn)}
+.req{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:5px;background:#fdecea;color:var(--warn);font-size:10.5px;font-weight:700;vertical-align:middle}
+.rowbtn{display:flex;gap:8px;flex-wrap:wrap}
+.rowbtn .btn{flex:1;min-width:110px}
+hr.sep{border:none;border-top:1px solid var(--line);margin:14px 0}
+
+/* ---------- overlay ---------- */
+#gate{
+  position:fixed;inset:0;background:rgba(20,26,34,.93);z-index:100;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+}
+#gate .box{background:#fff;border-radius:16px;max-width:560px;width:100%;padding:24px;max-height:90dvh;overflow:auto}
+#gate h2{margin:0 0 8px;font-size:19px}
+#gate ol{padding-left:20px;line-height:1.9;font-size:14px;margin:12px 0}
+#gate a{color:var(--accent)}
+#toast{
+  position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:200;
+  background:#1b2430;color:#fff;padding:11px 18px;border-radius:10px;font-size:14px;
+  opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;text-align:center
+}
+#toast.on{opacity:1}
+#busy{
+  position:fixed;inset:0;background:rgba(255,255,255,.7);z-index:150;
+  display:none;align-items:center;justify-content:center;font-weight:700
+}
+#busy.on{display:flex}
+.calbadge{background:var(--warn);color:#fff;border-radius:6px;padding:2px 7px;font-size:11px}
+table.cal{width:100%;border-collapse:collapse;font-size:11.5px}
+table.cal td{border-bottom:1px solid var(--line);padding:4px 3px}
+table.cal td:first-child{color:var(--sub)}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <h1>電気使用申込書メーカー</h1>
+    <span id="formName" class="formname"></span>
+    <div id="steps"></div>
+    <div class="sp"></div>
+    <button class="btn" id="btnReload" title="別の様式PDFを読み込む">PDF</button>
+  </header>
+
+  <div id="main">
+    <div id="stagewrap">
+      <div id="tools"></div>
+      <div id="stage">
+        <div id="stageInner"><div id="cwrap"><canvas id="cv"></canvas></div></div>
+      </div>
+    </div>
+    <div id="side"></div>
+  </div>
+</div>
+
+<div id="gate">
+  <div class="box">
+    <h2>最初に公式PDFを読み込みます</h2>
+    <p class="hint" style="font-size:13.5px">
+      東北電力の申込用紙そのものを下敷きにして記入します。1回読み込めば、このブラウザに記憶されるので次回からは不要です。
+    </p>
+    <ol>
+      <li><a href="https://www.tohoku-epco.co.jp/dprivate/inquery/facility/download/" target="_blank" rel="noopener">東北電力 電気使用申込書ダウンロード</a> を開く</li>
+      <li><b>［A-1］従量電灯Ｂ(単独申込書)</b> をダウンロード（重要事項説明書への同意が必要です）</li>
+      <li>下のボタンで、その <code>a1.pdf</code> を選ぶ</li>
+    </ol>
+    <p class="hint">※ 電灯A（D-1）や低圧電力（I-1）のPDFも読み込めます。記入欄の座標は「座標調整」モードで足せます。</p>
+    <input type="file" id="pdfFile" accept="application/pdf,.pdf" style="display:none">
+    <div class="rowbtn" style="margin-top:16px">
+      <button class="btn p" id="btnPick">PDFを選ぶ</button>
+      <button class="btn" id="btnCached" style="display:none">前回のPDFを使う</button>
+    </div>
+    <p class="hint" id="gateMsg"></p>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="busy">処理中…</div>
+
+<script>
+"use strict";
+/* ============================================================
+   電気使用申込書メーカー（東北電力・従量電灯B / 様式1030・4020）
+
+   設計方針
+   - 公式PDFそのものを Fabric キャンバスの背景にし、その上に
+     記入文字・丸囲み・図面を重ねる。出力はA4ラスタPDF。
+   - 記入欄の座標は FORM.fields に「PDFポイント(左上原点)」で持つ。
+     様式が変わっても、このJSONを差し替えるだけで対応できる。
+   - 座標が合わない/足りない場合は「座標調整」モードで
+     ドラッグして追加・修正し、JSONとして書き出せる。
+   ============================================================ */
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+/* 申込書の本文は日本語のCIDフォント（GothicMB101等）で組まれている。
+   CMapを渡さないと用紙の文字が一切描画されないため、必ず指定する。 */
+const PDFJS_OPTS = {
+  cMapUrl: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/",
+  cMapPacked: true,
+  standardFontDataUrl: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/standard_fonts/"
+};
+
+const PT_W = 595.276, PT_H = 841.89;   // A4 縦 (pt)
+const SCALE = 2.5;                      // 背景レンダリング倍率 = 180dpi 相当
+const P2C = (v) => v * SCALE;           // pt -> canvas px
+
+/* ============================================================
+   1. 様式レジストリ（フィールドマップ）
+   rect: [x, y, w, h]  単位=pt, 原点=ページ左上
+   座標はすべて公式PDFから実測。新しい様式は FORMS に足すだけで、
+   コード側の変更は不要。
+   ============================================================ */
+
+/* ---- 全様式で共通の上段ブロック ----
+   A-1（様式1030）と4ページ様式（様式1010）で、供給事業所〜お客さま連絡先までの
+   罫線・ラベル位置が0.3pt以内で一致することを実測で確認済み。 */
+const TOP_BLOCK = [
+  {s:1,p:0,id:"custNo", t:"grid", label:"お客さま番号（17桁）", ph:"01012345678901234",
+     y:233.5,h:14.5,sz:9,
+     segs:[[75.1,14.2,2],[103.5,14.17,3],[146.0,14.15,2],[174.3,14.2,2],
+           [202.7,14.15,2],[231.0,14.17,3],[273.5,14.2,2],[301.9,14.2,1]]},
+  /* --- マス目（1マス1文字）の欄 ---
+     郵便番号・電話・FAX・コードは用紙側が1文字ずつのマスになっている。
+     入力は1項目につき1欄だけ。ハイフンで区切るとマスの区切りに合わせて入る。 */
+  {s:1,p:0,id:"usePostal", req:"◎", t:"grid", label:"使用場所 郵便番号", ph:"959-1232",
+     y:172.5,h:12,sz:9, segs:[[99.2,9.95,3],[133.2,9.93,4]]},
+  {s:1,p:0,id:"useTel",    t:"grid", label:"使用場所 電話", ph:"0256-93-2243",
+     y:205.5,h:14,sz:10, segs:[[89.3,16.2,4],[170.3,16.2,4],[251.3,16.2,4]]},
+  {s:1,p:0,id:"coCode",    t:"grid", label:"工事会社コード", ph:"1234-567", mem:true,
+     y:148.5,h:12,sz:9, segs:[[358.6,14.2,4],[429.6,14.2,3]]},
+  {s:1,p:0,id:"coPostal",  t:"grid", label:"工事会社 郵便番号", ph:"959-0267", mem:true,
+     y:163.5,h:12,sz:9, segs:[[368.5,9.95,3],[402.5,9.93,4]]},
+  {s:1,p:0,id:"coTel",     t:"grid", label:"工事会社 電話", ph:"0256-93-2243", mem:true,
+     y:194.0,h:12,sz:9, segs:[[358.6,15.2,4],[434.6,15.2,4],[510.6,15.2,4]]},
+  {s:1,p:0,id:"coFax",     t:"grid", label:"工事会社 FAX", ph:"0256-93-2244", mem:true,
+     y:208.1,h:12,sz:9, segs:[[358.6,15.2,4],[434.6,15.2,4],[510.6,15.2,4]]},
+  {s:1,p:0,id:"coMob",     t:"grid", label:"担当者 携帯", ph:"090-1234-5678", mem:true,
+     y:236.5,h:12,sz:9, segs:[[358.6,20.2,3],[434.5,15.2,4],[510.4,15.2,4]]},
+  {s:1,p:0,id:"custPostal",t:"grid", label:"連絡先 郵便番号", ph:"959-1232",
+     y:252.0,h:12,sz:9, segs:[[354.3,9.95,3],[388.3,9.93,4]]},
+  {s:1,p:0,id:"custTel",   t:"grid", label:"連絡先 電話", ph:"090-1234-5678",
+     y:279.2,h:14,sz:10, segs:[[117.6,14.2,4],[188.6,14.2,4],[259.6,14.2,4]]},
+  {s:1,p:0,id:"supplyOffice", t:"text", label:"供給事業所",       rect:[ 96.4,113.4, 72.3,17.0], sz:9},
+  {s:1,p:0,id:"preConsult1", digits:true,  t:"text", label:"事前協議番号（前）", rect:[204.1,113.4, 36.0,17.0], sz:9, ac:"center"},
+  {s:1,p:0,id:"preConsult2", digits:true,  t:"text", label:"事前協議番号（後）", rect:[250.5,113.4, 65.6,17.0], sz:9, ac:"center"},
+  {s:1,p:0,id:"receiptNo", digits:true,    t:"text", label:"受付番号",         rect:[503.2, 92.1, 63.7,17.0], sz:9, ac:"center"},
+  {s:1,p:0,id:"contractKana", req:"◎", t:"text", label:"契約名義（フリガナ）", rect:[127.0,130.4,187.0,11.3], sz:7},
+  {s:1,p:0,id:"contractName", req:"◎", t:"text", label:"契約名義（15文字以内）", maxlen:15, rect:[ 92.0,143.0,222.0,25.0], sz:13, big:true},
+  {s:1,p:0,id:"useAddress", req:"◎",   t:"text", label:"使用場所 住所",     rect:[ 92.0,188.5,222.0,14.5], sz:9.5},
+  {s:1,p:0,id:"coName", req:"◎",  t:"text",label:"申込工事会社名",     rect:[360.6,116.0,208.0,29.0], sz:11, big:true, mem:true},
+  {s:1,p:0,id:"coAddr",  t:"text",label:"工事会社 住所",       rect:[360.6,178.4,208.0,13.0], sz:8, mem:true},
+  {s:1,p:0,id:"coPerson",t:"text",label:"担当者",             rect:[360.6,222.3,208.0,11.8], sz:9.5, mem:true},
+  {s:1,p:0,id:"custKana",  t:"text",label:"お客さま連絡先 フリガナ", rect:[155.5,249.6,158.5,11.0], sz:7},
+  {s:1,p:0,id:"custName",  t:"text",label:"お客さま連絡先 氏名",     rect:[120.0,262.0,194.0,14.5], sz:11},
+  {s:1,p:0,id:"custAddr",  t:"text",label:"連絡先 住所",             rect:[346.0,274.5,222.0,15.0], sz:8}
+];
+
+/* ---- A-1 固有（2枚目=様式4020 を含む）---- */
+const A1_REST = [
+  {s:2,p:0,id:"sendCustNo", t:"grid", label:"送付先お客さま番号（①②の場合のみ）", ph:"01012345678901234",
+     y:627.3,h:18.0,sz:10,
+     segs:[[162.2,24.05,2],[210.3,24.07,3],[282.5,24.05,2],[330.6,24.05,2],
+           [378.7,24.05,2],[426.8,24.07,3],[499.0,24.05,2],[547.1,24.1,1]]},
+  {s:2,p:0,id:"sendPostal", t:"grid", label:"送付先 郵便番号", ph:"959-1232",
+     y:584.0,h:12,sz:9, segs:[[292.4,9.95,3],[326.4,9.93,4]]},
+  {s:2,p:0,id:"sendTel",    t:"grid", label:"送付先 電話", ph:"0256-93-2243",
+     y:567.0,h:13,sz:9, segs:[[302.3,10.6,4],[355.3,10.6,4],[408.3,10.6,4]]},
+  {s:1,p:0,id:"chkAmend",     t:"check",label:"修正",             rect:[371.0, 87.5, 10.0,10.0]},
+  {s:1,p:0,id:"chkCancel",    t:"check",label:"取消",             rect:[410.5, 87.5, 10.0,10.0]},
+  {s:2,p:0,id:"startY", req:"◎", digits:true, t:"text",label:"使用開始希望 年", rect:[119.0,300.0, 25.0,15.0], sz:11, ac:"center"},
+  {s:2,p:0,id:"startM", req:"◎", digits:true, t:"text",label:"使用開始希望 月", rect:[161.3,300.0, 25.0,15.0], sz:11, ac:"center"},
+  {s:2,p:0,id:"startD", req:"◎", digits:true, t:"text",label:"使用開始希望 日", rect:[203.8,300.0, 25.0,15.0], sz:11, ac:"center"},
+  {s:2,p:0,id:"startW", t:"text",label:"曜日",            rect:[248.0,300.6, 30.0,13.0], sz:9, ac:"center"},
+  {s:2,p:0,id:"applyType", req:"◎", t:"choice", label:"申込種別",
+    opts:[ {v:"新設",  rect:[346.7,299.0,25.0,14.0]},
+           {v:"Ａ変",  rect:[389.2,299.0,25.0,14.0]},
+           {v:"種変",  rect:[431.7,299.0,25.0,14.0]},
+           {v:"位置変",rect:[474.2,299.0,25.5,14.0]} ]},
+  {s:2,p:0,id:"curContract", t:"text", label:"現契約種別", rect:[354.0,322.0,193.0,13.0], sz:9.5},
+  {s:2,p:0,id:"ampNew", req:"◎", t:"text", label:"契約電流（新）", rect:[120.0,343.0, 60.0,17.0], sz:13, ac:"right", big:true},
+  {s:2,p:0,id:"ampCur", numish:true, t:"text", label:"契約電流（現）", rect:[120.0,365.6, 38.0,17.0], sz:11, ac:"right"},
+  {s:2,p:0,id:"supplyNew", req:"◎", t:"choice", label:"供給方式・電圧（新）",
+    opts:[ {v:"単相2線式100V",     rect:[253.5,344.2, 56.0,13.5]},
+           {v:"単相3線式100/200V", rect:[329.4,344.2, 79.0,13.5]},
+           {v:"その他",            rect:[428.2,344.2, 24.5,13.5]} ]},
+  {s:2,p:0,id:"supplyNewEtc", t:"text", label:"供給方式（新）その他", rect:[461.0,345.0, 93.0,12.0], sz:8.5},
+  {s:2,p:0,id:"supplyCur", t:"choice", label:"供給方式・電圧（現）",
+    opts:[ {v:"単相2線式100V",     rect:[253.5,366.9, 56.0,13.5]},
+           {v:"単相3線式100/200V", rect:[329.4,366.9, 79.0,13.5]},
+           {v:"その他",            rect:[428.2,366.9, 24.5,13.5]} ]},
+  {s:2,p:0,id:"supplyCurEtc", t:"text", label:"供給方式（現）その他", rect:[461.0,367.7, 93.0,12.0], sz:8.5},
+  {s:2,p:0,id:"gyoshu", req:"◎", t:"choice", label:"業種",
+    opts:[ {v:"事務所",         rect:[128.3,390.0,24.0,13.5]},
+           {v:"商店",           rect:[161.4,390.0,17.0,13.5]},
+           {v:"旅館/飲食店",    rect:[187.3,390.0,41.5,13.5]},
+           {v:"娯楽施設",       rect:[238.1,390.0,31.0,13.5]},
+           {v:"理容/クリーニング",rect:[278.3,390.0,62.7,13.5]},
+           {v:"公共事業",       rect:[350.3,390.0,31.0,13.5]},
+           {v:"住宅",           rect:[390.5,390.0,17.0,13.5]},
+           {v:"その他",         rect:[416.5,390.0,24.0,13.5]} ]},
+  {s:2,p:0,id:"gyoshuEtc", t:"text", label:"業種 その他", rect:[449.0,391.0,98.0,12.0], sz:8.5},
+  {s:2,p:0,id:"sbAmp", req:"◎", numish:true,     t:"text", label:"電力SB 容量(A)",       rect:[181.0,412.5, 26.0,13.0], sz:10, ac:"center"},
+  {s:2,p:0,id:"mainBrkA", numish:true,  t:"text", label:"お客さま主開閉器 容量(A)", rect:[322.5,412.5, 54.0,13.0], sz:10, ac:"center"},
+  {s:2,p:0,id:"mainBrkT",  t:"text", label:"お客さま主開閉器 型式",  rect:[411.0,412.5,143.0,13.0], sz:9},
+  {s:2,p:0,id:"elcbA", numish:true,     t:"text", label:"漏電遮断器容量(A)",     rect:[118.6,437.0, 53.0,14.0], sz:10, ac:"right"},
+  {s:2,p:0,id:"inletBrkA", numish:true, t:"text", label:"引込開閉器容量(A)",     rect:[232.0,437.0, 53.0,14.0], sz:10, ac:"right"},
+  {s:2,p:0,id:"ih", t:"choice", label:"IHクッキングヒーター",
+    opts:[ {v:"有", rect:[366.6,437.5,9.0,12.0]}, {v:"無", rect:[385.5,437.5,9.0,12.0]} ]},
+  {s:2,p:0,id:"saiene", t:"choice", label:"再エネ発電設備の系統連系",
+    opts:[ {v:"無",    rect:[465.0,437.5, 9.0,12.0]},
+           {v:"太陽光",rect:[483.9,437.5,23.0,12.0]},
+           {v:"風力",  rect:[516.9,437.5,16.0,12.0]},
+           {v:"その他",rect:[542.9,437.5,23.0,12.0]} ]},
+  {s:2,p:0,id:"payMethod", req:"新設時◎", t:"choice", label:"電気料金お支払い方法",
+    opts:[ {v:"1 現在の自動振替口座からの継続",  rect:[ 74.5,466.0,18.0,18.0]},
+           {v:"2 現在のクレジットカードからの継続",rect:[160.7,466.0,18.0,18.0]},
+           {v:"3 自動振替口座の新規申込",        rect:[246.9,466.0,18.0,18.0]},
+           {v:"4 クレジットカードの新規申込",     rect:[333.1,466.0,18.0,18.0]},
+           {v:"5 払込票",                       rect:[419.3,466.0,18.0,18.0]},
+           {v:"6 請求書（金融機関への振込）",     rect:[505.5,466.0,18.0,18.0]},
+           {v:"7 お客さまコードによる支払い",     rect:[ 74.5,519.0,18.0,18.0]} ]},
+  {s:2,p:0,id:"payCode", digits:true, t:"text", label:"お客さまコード（⑦の場合）", rect:[233.0,530.0,180.0,19.0], sz:10, ac:"center"},
+  {s:2,p:0,id:"sendKana", t:"text", label:"送付先 フリガナ", rect:[127.0,566.0,154.0,10.0], sz:7},
+  {s:2,p:0,id:"sendName", t:"text", label:"送付先 氏名",     rect:[ 91.0,577.5,190.0,14.0], sz:10},
+  {s:2,p:0,id:"sendAddrSame", t:"choice", label:"送付先住所",
+    opts:[ {v:"使用場所と同じ",     rect:[143.0,592.5,10.0,10.0]},
+           {v:"お客さま連絡先と同じ",rect:[277.0,592.5,10.0,10.0]},
+           {v:"その他",             rect:[143.0,608.5,10.0,10.0]} ]},
+  {s:2,p:0,id:"sendAddr",   t:"text", label:"送付先 住所",     rect:[380.0,600.0,188.0,14.0], sz:8},
+  {s:2,p:0,id:"tsushin", t:"multi", label:"通信欄", rect:[ 64.0,656.5,438.0, 94.0], sz:10},
+  {s:3,p:1,id:"p2Name", t:"text", label:"契約名義（2枚目）",     rect:[100.0,128.0,213.0,26.0], sz:12, big:true, from:"contractName"},
+  {s:3,p:1,id:"p2Co",   t:"text", label:"申込工事会社（2枚目）", rect:[355.0,128.0,208.0,26.0], sz:11, big:true, from:"coName"},
+  {s:3,p:1,id:"judenY", digits:true, t:"text", label:"受点完成予定 年",  rect:[133.0,344.5,29.0,10.5], sz:8, ac:"center"},
+  {s:3,p:1,id:"judenM", digits:true, t:"text", label:"受点完成予定 月",  rect:[172.0,344.5,29.0,10.5], sz:8, ac:"center"},
+  {s:3,p:1,id:"judenD", digits:true, t:"text", label:"受点完成予定 日",  rect:[211.0,344.5,29.0,10.5], sz:8, ac:"center"},
+  {s:3,p:1,id:"hikikomiType", req:"自社工事時◎", t:"choice", label:"建設分 引込線 種類",
+    opts:[ {v:"DV2", rect:[169.8,444.0,14.7,6.9]},
+           {v:"DV3", rect:[191.6,444.0,14.7,6.9]},
+           {v:"DL3", rect:[213.3,444.0,13.8,6.9]} ]},
+  {s:3,p:1,id:"hikikomiSize", req:"自社工事時◎", numish:true, t:"text", label:"建設分 引込線 太さ(mm)", rect:[252.0,443.0, 42.0,9.5], sz:7, ac:"center"},
+  {s:3,p:1,id:"hikikomiLen", req:"自社工事時◎", numish:true,  t:"text", label:"建設分 引込線 長さ(m)",  rect:[326.0,443.0, 45.0,9.5], sz:7, ac:"center"},
+  {s:3,p:1,id:"inletWire",    t:"text", label:"引込口配線 種類",        rect:[441.0,443.0, 51.0,9.5], sz:7, ac:"center"},
+  {s:3,p:1,id:"inletSize", numish:true,    t:"text", label:"引込口配線 太さ(mm)",    rect:[510.0,443.0, 42.0,9.5], sz:7, ac:"center"},
+  {s:3,p:1,id:"oldType", t:"choice", label:"既設分 引込線 種類",
+    opts:[ {v:"DV2", rect:[169.8,454.6,14.7,6.9]},
+           {v:"DV3", rect:[191.6,454.6,14.7,6.9]},
+           {v:"DL3", rect:[213.3,454.6,13.8,6.9]} ]},
+  {s:3,p:1,id:"oldSize", numish:true, t:"text", label:"既設分 引込線 太さ(mm)", rect:[252.0,453.6, 42.0,9.5], sz:7, ac:"center"},
+  {s:3,p:1,id:"oldLen", numish:true,  t:"text", label:"既設分 引込線 長さ(m)",  rect:[326.0,453.6, 45.0,9.5], sz:7, ac:"center"},
+  {s:3,p:1,id:"shizaiY", req:"庫出あり時◎", digits:true, t:"text", label:"資材受取希望 年", rect:[151.0,674.5,48.0,11.0], sz:9, ac:"center"},
+  {s:3,p:1,id:"shizaiM", req:"庫出あり時◎", digits:true, t:"text", label:"資材受取希望 月", rect:[209.0,674.5,33.0,11.0], sz:9, ac:"center"},
+  {s:3,p:1,id:"shizaiD", req:"庫出あり時◎", digits:true, t:"text", label:"資材受取希望 日", rect:[252.0,674.5,33.0,11.0], sz:9, ac:"center"}
+];
+
+/* ---- 4ページ様式（様式1010/2010/3010/4010）固有 ----
+   D-1 従量電灯A・B・C / E-1 定額電灯・公衆街路灯A / F-1 臨時電灯 /
+   I-1 低圧電力 / J-1 融雪用電力・農事用電力 は、
+   1・3・4ページ目がビット単位で同一（2ページ目の負荷設備だけが違う）。 */
+const FOURP_REST = [
+  {s:1,p:0,id:"chkAmend",  t:"check", label:"修正", rect:[371.0, 91.3,10.0,10.0]},
+  {s:1,p:0,id:"chkCancel", t:"check", label:"取消", rect:[410.5, 91.3,10.0,10.0]},
+
+  {s:2,p:0,id:"startY", req:"◎", digits:true, t:"text", label:"使用開始希望 年", rect:[128.5,295.5,23.5,14.0], sz:10, ac:"center"},
+  {s:2,p:0,id:"startM", req:"◎", digits:true, t:"text", label:"使用開始希望 月", rect:[167.6,295.5,23.5,14.0], sz:10, ac:"center"},
+  {s:2,p:0,id:"startD", req:"◎", digits:true, t:"text", label:"使用開始希望 日", rect:[206.7,295.5,27.0,14.0], sz:10, ac:"center"},
+  {s:2,p:0,id:"applyType", req:"◎", t:"choice", label:"申込種別",
+    opts:[ {v:"新設",  rect:[327.3,296.3,14.2,9.5]},
+           {v:"Ａ変",  rect:[355.6,296.3,14.2,9.5]},
+           {v:"容変",  rect:[384.0,296.3,14.1,9.5]},
+           {v:"種変",  rect:[412.3,296.3,14.1,9.5]},
+           {v:"機種変",rect:[440.6,296.3,21.2,9.5]},
+           {v:"位置変",rect:[476.0,296.3,21.2,9.5]} ]},
+  {s:2,p:0,id:"otherType", t:"text", label:"その他の契約種別", rect:[156.5,379.5,75.5,11.0], sz:8},
+
+  {s:2,p:0,id:"payMethod", req:"新設時◎", t:"choice", label:"電気料金お支払い方法",
+    opts:[ {v:"1 現在の自動振替口座からの継続",   rect:[ 74.5,548.2,18.0,18.0]},
+           {v:"2 現在のクレジットカードからの継続",rect:[160.7,548.2,18.0,18.0]},
+           {v:"3 自動振替口座の新規申込",         rect:[246.9,548.2,18.0,18.0]},
+           {v:"4 クレジットカードの新規申込",      rect:[333.1,548.2,18.0,18.0]},
+           {v:"5 払込票",                        rect:[419.3,548.2,18.0,18.0]},
+           {v:"6 請求書（金融機関への振込）",      rect:[505.5,548.2,18.0,18.0]},
+           {v:"7 お客さまコードによる支払い",      rect:[ 74.5,601.2,18.0,18.0]} ]},
+  {s:2,p:0,id:"payCode", digits:true, t:"text", label:"お客さまコード（⑦の場合）", rect:[233.0,612.0,180.0,19.0], sz:10, ac:"center"},
+
+  {s:2,p:0,id:"sendKana", t:"text", label:"送付先 フリガナ", rect:[127.0,648.0,154.0,10.0], sz:7},
+  {s:2,p:0,id:"sendName", t:"text", label:"送付先 氏名",     rect:[ 91.0,659.5,190.0,14.0], sz:10},
+  {s:2,p:0,id:"sendAddrSame", t:"choice", label:"送付先住所",
+    opts:[ {v:"使用場所と同じ",     rect:[ 95.0,675.5,10.6,10.6]},
+           {v:"お客さま連絡先と同じ",rect:[181.8,675.5,10.6,10.6]},
+           {v:"その他",             rect:[ 95.0,686.1,10.6,10.6]} ]},
+  {s:2,p:0,id:"tsushin", t:"multi", label:"通信欄", rect:[ 64.0,736.5,438.0,19.0], sz:8},
+
+  /* 3枚目：単線結線図ページの見出し欄 */
+  {s:3,p:2,id:"p3Name", t:"text", label:"契約名義（3枚目）",     rect:[100.0,120.0,213.0,26.0], sz:12, big:true, from:"contractName"},
+  {s:3,p:2,id:"p3Co",   t:"text", label:"申込工事会社（3枚目）", rect:[355.0,120.0,208.0,26.0], sz:11, big:true, from:"coName"},
+  /* 4枚目：付近図ページの見出し欄 */
+  {s:3,p:3,id:"p4Name", t:"text", label:"契約名義（4枚目）",     rect:[100.0,120.0,213.0,26.0], sz:12, big:true, from:"contractName"},
+  {s:3,p:3,id:"p4Co",   t:"text", label:"申込工事会社（4枚目）", rect:[355.0,120.0,208.0,26.0], sz:11, big:true, from:"coName"}
+];
+
+const FORMS = {
+  "tohoku-a1": {
+    id:"tohoku-a1", name:"従量電灯B 単独申込書（A-1）", pages:2,
+    detect: function (n, txt) { return n === 2 && txt.indexOf("従量電灯B専用") >= 0; },
+    areas: [
+      { id:"vicinity", page:1, label:"付近図",       rect:[ 60.9,187.1,231.9,147.4] },
+      { id:"usearea",  page:1, label:"使用区域図",   rect:[292.8,187.1,272.7,147.4] },
+      { id:"sld",      page:1, label:"単線結線図",   rect:[ 60.9,502.8,231.9,153.4] }
+    ],
+    fields: TOP_BLOCK.concat(A1_REST)
+  },
+
+  "tohoku-4p": {
+    id:"tohoku-4p", name:"電気使用申込書（4ページ様式）", pages:4,
+    detect: function (n, txt) { return n === 4 && txt.indexOf("電気使用申込書") >= 0; },
+    /* 単線結線図の枠は中央 x=306.9 の縦線で左右に分かれている。
+       記入方法(p.9)の記載例どおり、左＝主開閉器契約、右＝実量契約で使う。
+       貼る範囲は必ず片側だけ。 */
+    areas: [
+      { id:"sld1",     page:2, label:"単線結線図（申込内容1・左）", rect:[ 78.0,172.9,228.9,228.1] },
+      { id:"sld1r",    page:2, label:"単線結線図（申込内容1・右）", rect:[306.9,172.9,264.0,228.1] },
+      { id:"sld2",     page:2, label:"単線結線図（申込内容2）",    rect:[ 78.0,412.3,228.9,223.8] },
+      { id:"vicinity", page:3, label:"付近図",                    rect:[ 61.0,187.1,231.7,177.0] },
+      { id:"usearea",  page:3, label:"使用区域図",                rect:[292.7,187.1,272.5,177.0] }
+    ],
+    fields: TOP_BLOCK.concat(FOURP_REST)
+  },
+
+  "tohoku-b1": {
+    id:"tohoku-b1", name:"公衆街路灯A 単独申込書（B-1）", pages:2,
+    detect: function (n, txt) { return n === 2 && txt.indexOf("公衆街路灯A専用") >= 0; },
+    /* 図面エリアのみ実装済み。記入欄はA-1と配置が違う（下半分が約62pt下）ため、
+       「座標調整モード」で足してJSON保存して使う。 */
+    areas: [
+      { id:"vicinity", page:1, label:"付近図",     rect:[ 60.9,187.1,231.9,147.4] },
+      { id:"usearea",  page:1, label:"使用区域図", rect:[292.8,187.1,272.7,147.4] }
+    ],
+    partial: true,
+    fields: TOP_BLOCK.slice()
+  }
+};
+
+/* 読み込んだPDFから様式を判定する。判らなければA-1のまま。 */
+function detectForm(numPages, firstPageText) {
+  for (const k in FORMS) {
+    const f = FORMS[k];
+    try { if (f.detect(numPages, firstPageText)) return f; } catch (e) {}
+  }
+  return null;
+}
+
+let FORM = FORMS["tohoku-a1"];
+
+/* ============================================================
+   2. アプリ状態
+   ============================================================ */
+const state = {
+  step: 1,
+  page: 0,
+  tool: "select",
+  pencilOnly: true,
+  values: {},          // fieldId -> string
+  zoom: 1,
+  zoomedArea: null,
+  calibrate: false,
+  mapOpacity: 0.35,
+  mapStyle: "seamlessphoto",
+  mapZoom: 19
+};
+
+let canvas = null;             // fabric.Canvas
+let pageBg = [];               // page index -> dataURL
+let fieldObj = {};             // fieldId -> fabric object (or array)
+let pageDraw = [];             // page index -> [fabric objects]  (図面レイヤ)
+let undoStack = [];            // {page, obj}
+let pdfBytesCache = null;
+let detectedMsg = "";         // 様式判別の結果メッセージ
+
+/* ---------- helpers ---------- */
+const $ = (s, r) => (r || document).querySelector(s);
+const el = (tag, attrs, kids) => {
+  const n = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === "class") n.className = attrs[k];
+    else if (k === "html") n.innerHTML = attrs[k];
+    else if (k === "text") n.textContent = attrs[k];
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), attrs[k]);
+    else n.setAttribute(k, attrs[k]);
+  }
+  if (kids) [].concat(kids).forEach(c => c && n.appendChild(c));
+  return n;
+};
+let toastT = null;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg; t.classList.add("on");
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2200);
+}
+function busy(on, msg) {
+  const b = $("#busy");
+  if (msg) b.textContent = msg;
+  else if (on) b.textContent = "処理中…";
+  b.classList.toggle("on", !!on);
+}
+const fieldById = (id) => FORM.fields.find(f => f.id === id);
+
+/* ============================================================
+   3. IndexedDB（PDFの記憶）
+   ============================================================ */
+const DB = {
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open("denki-moushikomi", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("kv");
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async put(k, v) {
+    try {
+      const db = await DB.open();
+      await new Promise((res, rej) => {
+        const tx = db.transaction("kv", "readwrite");
+        tx.objectStore("kv").put(v, k);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      });
+    } catch (e) { /* 記憶できなくても動作は継続 */ }
+  },
+  async get(k) {
+    try {
+      const db = await DB.open();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction("kv", "readonly");
+        const q = tx.objectStore("kv").get(k);
+        q.onsuccess = () => res(q.result);
+        q.onerror = () => rej(q.error);
+      });
+    } catch (e) { return null; }
+  }
+};
+
+/* ============================================================
+   4. PDF読み込み → 背景ラスタ化
+   ============================================================ */
+async function renderPdf(bytes) {
+  busy(true, "用紙を読み込んでいます…");
+  try {
+    const pdf = await pdfjsLib.getDocument(
+      Object.assign({ data: bytes.slice(0) }, PDFJS_OPTS)).promise;
+
+    // 1ページ目の文字から様式を判定し、対応するフィールドマップに切り替える
+    let head = "";
+    try {
+      const tc = await (await pdf.getPage(1)).getTextContent();
+      head = tc.items.map(i => i.str).join("");
+    } catch (e) {}
+    const hit = detectForm(pdf.numPages, head);
+    if (hit) {
+      FORM = hit;
+      state.values = {};
+      detectedMsg = "様式を判別しました：" + FORM.name +
+        (FORM.partial ? "（記入欄は未対応。図面のみ使えます）" : "");
+    } else {
+      detectedMsg = "様式を判別できませんでした（" + pdf.numPages +
+        "ページ）。図面と座標調整モードは使えます。";
+    }
+
+    pageBg = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      busy(true, "用紙を読み込んでいます… " + i + " / " + pdf.numPages + " ページ");
+      const page = await pdf.getPage(i);
+      const vp = page.getViewport({ scale: SCALE });
+      const c = document.createElement("canvas");
+      c.width = Math.round(vp.width);
+      c.height = Math.round(vp.height);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, c.width, c.height);
+      // intent:"print" は requestAnimationFrame を使わない。
+      // タブが非アクティブでも描画が止まらず、印刷用途にも合っている。
+      await page.render({ canvasContext: ctx, viewport: vp, intent: "print" }).promise;
+      pageBg.push(c.toDataURL("image/png"));
+    }
+    FORM.pages = pageBg.length;
+    pageDraw = pageBg.map(() => []);
+    fieldObj = {};
+    undoStack = [];
+  } finally { busy(false); }
+}
+
+/* ============================================================
+   5. Fabric セットアップ
+   ============================================================ */
+function initCanvas() {
+  const w = Math.round(PT_W * SCALE), h = Math.round(PT_H * SCALE);
+  canvas = new fabric.Canvas("cv", {
+    width: w, height: h,
+    backgroundColor: "#fff",
+    preserveObjectStacking: true,
+    selection: true,
+    enableRetinaScaling: false
+  });
+  canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+  canvas.freeDrawingBrush.width = 4;
+  canvas.freeDrawingBrush.color = "#111";
+  canvas.allowTouchScrolling = true;   // 既定では指のなぞりは画面移動に使う
+
+  // Apple Pencil 優先：ペンで描く／指はパンと選択
+  const up = canvas.upperCanvasEl;
+  up.addEventListener("pointerdown", (e) => {
+    if (state.tool === "pen") {
+      const draw = state.pencilOnly ? (e.pointerType === "pen") : true;
+      canvas.isDrawingMode = draw;
+      // Pencil以外（指）のときは描かせず、画面スクロールに回す
+      canvas.allowTouchScrolling = !draw;
+    }
+  }, true);
+
+  // 描いたものを図面レイヤに登録
+  canvas.on("path:created", (o) => {
+    o.path.set({ __draw: true });
+    pageDraw[state.page].push(o.path);
+    undoStack.push({ page: state.page, obj: o.path });
+  });
+
+  setupLineTool();
+  setupCalibrateTool();
+  setupPan();
+  setupPinch();
+  fitZoom();
+}
+
+function showPage(i) {
+  if (!pageBg[i]) return Promise.resolve();
+  state.page = i;
+  canvas.remove.apply(canvas, canvas.getObjects());
+  // このページのフィールド文字
+  FORM.fields.forEach(f => {
+    if (f.p !== i) return;
+    const o = fieldObj[f.id];
+    if (o) [].concat(o).forEach(x => canvas.add(x));
+  });
+  // このページの図面オブジェクト（地図・写真は最背面へ）
+  pageDraw[i].forEach(o => canvas.add(o));
+  pageDraw[i].forEach(o => { if (o.__mapArea) canvas.sendToBack(o); });
+  renderTools();
+  return new Promise((res) => {
+    fabric.Image.fromURL(pageBg[i], (img) => {
+      canvas.setBackgroundImage(img, () => { canvas.renderAll(); res(); }, {
+        scaleX: canvas.getWidth() / img.width,
+        scaleY: canvas.getHeight() / img.height
+      });
+    });
+  });
+}
+
+function fitZoom() {
+  state.zoomedArea = null;
+  const stage = $("#stage");
+  const avail = stage.clientWidth - 40;
+  // 画面が隠れている・回転中などで幅が取れないときは倍率を触らない
+  if (avail <= 0) { setTimeout(fitZoom, 250); return; }
+  setZoom(Math.min(1, avail / canvas.getWidth()));
+}
+/* 倍率を変える。anchor（画面座標）で指した点が動かないようにスクロールも直す。
+   これが無いと、＋を押すたびに見ていた場所が画面外へ逃げていく。 */
+function setZoom(z, anchorX, anchorY) {
+  const stage = $("#stage"), wrap = $("#cwrap");
+  const old = state.zoom || 1;
+  const nz = Math.max(0.1, Math.min(6, z));
+  const sr = stage.getBoundingClientRect();
+  const ax = (anchorX == null) ? sr.left + stage.clientWidth / 2 : anchorX;
+  const ay = (anchorY == null) ? sr.top + stage.clientHeight / 2 : anchorY;
+  const wr = wrap.getBoundingClientRect();
+  const cx = (ax - wr.left) / old;          // アンカーのキャンバス内座標
+  const cy = (ay - wr.top) / old;
+
+  state.zoom = nz;
+  canvas.setDimensions(
+    { width: canvas.getWidth() * nz + "px", height: canvas.getHeight() * nz + "px" },
+    { cssOnly: true }
+  );
+  const wr2 = wrap.getBoundingClientRect();
+  stage.scrollLeft += (wr2.left + cx * nz) - ax;
+  stage.scrollTop  += (wr2.top  + cy * nz) - ay;
+  const lab = document.getElementById("zoomPct");
+  if (lab) lab.textContent = Math.round(nz * 100) + "%";
+}
+
+/* 手のひら（移動）。拡大したあと画面を動かす手段がこれ。
+   指でもマウスでも同じように効く。 */
+function setupPan() {
+  const up = canvas.upperCanvasEl, stage = $("#stage");
+  let p = null;
+  up.addEventListener("pointerdown", (e) => {
+    if (state.tool !== "pan") return;
+    p = { x: e.clientX, y: e.clientY, sl: stage.scrollLeft, st: stage.scrollTop };
+    try { up.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault(); e.stopPropagation();
+  }, true);
+  up.addEventListener("pointermove", (e) => {
+    if (!p || state.tool !== "pan") return;
+    stage.scrollLeft = p.sl - (e.clientX - p.x);
+    stage.scrollTop  = p.st - (e.clientY - p.y);
+    e.preventDefault(); e.stopPropagation();
+  }, true);
+  const end = (e) => {
+    if (!p) return;
+    p = null;
+    try { up.releasePointerCapture(e.pointerId); } catch (err) {}
+  };
+  up.addEventListener("pointerup", end, true);
+  up.addEventListener("pointercancel", end, true);
+}
+/* 図面の枠だけを画面いっぱいに拡大して、その位置までスクロールする。
+   A4全体を表示したまま小さい枠に描くのは現場では無理があるため。 */
+function zoomToArea(areaId) {
+  const area = FORM.areas.find(a => a.id === areaId);
+  if (!area) return;
+  if (state.page !== area.page) { showPage(area.page).then(() => zoomToArea(areaId)); return; }
+
+  const stage = $("#stage"), wrap = $("#cwrap");
+  const availW = stage.clientWidth - 20, availH = stage.clientHeight - 20;
+  if (availW <= 0 || availH <= 0) { setTimeout(() => zoomToArea(areaId), 200); return; }
+
+  const w = P2C(area.rect[2]), h = P2C(area.rect[3]);
+  setZoom(Math.min(availW / w, availH / h));
+  const z = state.zoom;
+
+  // setZoom 後のレイアウトを読んでから、枠の中心を画面中央へ
+  const cx = P2C(area.rect[0] + area.rect[2] / 2);
+  const cy = P2C(area.rect[1] + area.rect[3] / 2);
+  const sr = stage.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  stage.scrollLeft += (wr.left + cx * z) - (sr.left + stage.clientWidth / 2);
+  stage.scrollTop  += (wr.top  + cy * z) - (sr.top  + stage.clientHeight / 2);
+  state.zoomedArea = areaId;
+  renderTools();
+}
+
+function setupPinch() {
+  const stage = $("#stage");
+  let d0 = 0, z0 = 1;
+  stage.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      d0 = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                      e.touches[0].clientY - e.touches[1].clientY);
+      z0 = state.zoom;
+    }
+  }, { passive: true });
+  stage.addEventListener("touchmove", (e) => {
+    if (e.touches.length === 2 && d0 > 0) {
+      e.preventDefault();
+      const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                           e.touches[0].clientY - e.touches[1].clientY);
+      // 2本指の中心を基準に拡大縮小する（つまんだ場所が動かない）
+      const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      setZoom(z0 * (d / d0), mx, my);
+    }
+  }, { passive: false });
+  stage.addEventListener("touchend", () => { d0 = 0; }, { passive: true });
+}
+
+/* ============================================================
+   6. フィールド描画
+   ============================================================ */
+function fitText(obj, maxW) {
+  let guard = 0;
+  while (obj.width * obj.scaleX > maxW && obj.fontSize > 4 && guard++ < 60) {
+    obj.set("fontSize", obj.fontSize - 0.5);
+    obj.initDimensions && obj.initDimensions();
+    obj.setCoords();
+  }
+}
+
+function drawField(f) {
+  if (!f) return;
+  // 既存を消す
+  const old = fieldObj[f.id];
+  if (old) { [].concat(old).forEach(o => canvas.remove(o)); delete fieldObj[f.id]; }
+
+  const v = state.values[f.id];
+  if (v === undefined || v === null || v === "") { canvas.requestRenderAll(); return; }
+
+  const R = f.rect ? f.rect.map(P2C) : null;
+  let made = null;
+
+  if (f.t === "grid") {
+    // 用紙側が1文字ずつのマスになっている欄（郵便番号・電話・FAX・コード）。
+    // ハイフンで区切られていればマスの区切りに合わせ、無ければ先頭から順に詰める。
+    const raw = String(v);
+    const segs = f.segs;
+    const parts = raw.split(/[^0-9A-Za-zА-я]+/).filter(x => x !== "");
+    let chunks;
+    if (parts.length === segs.length) {
+      chunks = parts;
+    } else {
+      const flat = raw.replace(/[^0-9A-Za-z]/g, "");
+      chunks = []; let i = 0;
+      for (let k = 0; k < segs.length; k++) { chunks.push(flat.substr(i, segs[k][2])); i += segs[k][2]; }
+    }
+    const objs = [];
+    for (let k = 0; k < segs.length; k++) {
+      const x0 = segs[k][0], pit = segs[k][1], n = segs[k][2];
+      const txt = chunks[k] || "";
+      for (let i = 0; i < n && i < txt.length; i++) {
+        objs.push(new fabric.Text(txt.charAt(i), {
+          fontSize: P2C(f.sz || 9),
+          fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
+          fill: "#0b3d91", originX: "center", originY: "center",
+          left: P2C(x0 + (i + 0.5) * pit), top: P2C(f.y + f.h / 2)
+        }));
+      }
+    }
+    made = objs.length ? objs : null;
+
+  } else if (f.t === "multi") {
+    // 通信欄など：折り返して複数行で入れる
+    const o = new fabric.Textbox(String(v), {
+      left: R[0] + P2C(1.5), top: R[1] + P2C(1.5),
+      width: R[2] - P2C(3),
+      fontSize: P2C(f.sz || 10),
+      fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
+      fill: "#0b3d91", textAlign: f.ac || "left",
+      splitByGrapheme: true, editable: false, lockRotation: true
+    });
+    let g = 0;
+    while (o.height > R[3] && o.fontSize > 4 && g++ < 80) {
+      o.set("fontSize", o.fontSize - 0.5);
+      o.initDimensions(); o.setCoords();
+    }
+    made = o;
+
+  } else if (f.t === "text") {
+    // 1行の欄：折り返さず、枠に収まるまで字を縮める。
+    // Textbox だと勝手に改行して「燕市／吉田宮小路」のように
+    // 2段に割れてしまうため、折り返さない fabric.Text を使う。
+    const pad = P2C(1.5);
+    const maxW = R[2] - pad * 2, maxH = R[3];
+    const o = new fabric.Text(String(v), {
+      fontSize: P2C(f.sz || 10),
+      fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
+      fill: "#0b3d91", editable: false, lockRotation: true
+    });
+    let g = 0;
+    while ((o.width > maxW || o.height > maxH) && o.fontSize > 3 && g++ < 160) {
+      o.set("fontSize", o.fontSize - 0.5);
+      if (o.initDimensions) o.initDimensions();
+      o.setCoords();
+    }
+    let left = R[0] + pad;
+    if (f.ac === "center") left = R[0] + (R[2] - o.width) / 2;
+    else if (f.ac === "right") left = R[0] + R[2] - o.width - pad;
+    o.set({ left: left, top: R[1] + (R[3] - o.height) / 2 });
+    made = o;
+
+  } else if (f.t === "check") {
+    made = new fabric.Text("✓", {
+      left: R[0], top: R[1] - P2C(2),
+      fontSize: R[3] * 1.35,
+      fontFamily: '"Hiragino Sans",sans-serif',
+      fill: "#c62828", fontWeight: "bold"
+    });
+
+  } else if (f.t === "choice") {
+    const opt = (f.opts || []).find(o => o.v === v);
+    if (!opt) { canvas.requestRenderAll(); return; }
+    const r = opt.rect.map(P2C);
+    const pad = P2C(2.2);
+    made = new fabric.Ellipse({
+      left: r[0] - pad, top: r[1] - pad,
+      rx: (r[2] + pad * 2) / 2, ry: (r[3] + pad * 2) / 2,
+      fill: "", stroke: "#c62828", strokeWidth: Math.max(1.6, P2C(0.7)),
+      originX: "left", originY: "top"
+    });
+  }
+
+  if (made) {
+    const list = [].concat(made);
+    list.forEach(o => o.set({ __field: f.id, selectable: false, evented: false, objectCaching: false }));
+    fieldObj[f.id] = made;
+    if (f.p === state.page) list.forEach(o => canvas.add(o));
+  }
+  canvas.requestRenderAll();
+}
+
+function setValue(id, v, opts) {
+  state.values[id] = v;
+  const f = fieldById(id);
+  if (f) drawField(f);
+  // 連動フィールド（2枚目へコピー等）
+  FORM.fields.forEach(g => { if (g.from === id) { state.values[g.id] = v; drawField(g); } });
+  if (!(opts && opts.silent)) applyRules(id);
+  saveLocal();
+}
+
+/* from 指定のフィールド（2枚目へのコピーなど）を一括で追従させる。
+   localStorage やJSON読込のように setValue を経由しない復元でも必要。 */
+function propagateLinks() {
+  FORM.fields.forEach(g => {
+    if (!g.from) return;
+    const v = state.values[g.from];
+    if (v !== undefined && v !== null && v !== "") state.values[g.id] = v;
+  });
+}
+
+/* 業務ルール：40A以上は単3固定 */
+function applyRules(changed) {
+  if (changed === "ampNew") {
+    const f = fieldById("supplyNew");
+    if (!f) return;                       // 4ページ様式など、この欄が無い様式では何もしない
+    const a = parseInt(String(state.values.ampNew || "").replace(/[^0-9]/g, ""), 10);
+    if (a >= 40 && state.values.supplyNew !== "単相3線式100/200V") {
+      state.values.supplyNew = "単相3線式100/200V";
+      drawField(f);
+      renderSide();
+      toast("40A以上のため供給方式を単相3線式にしました");
+    }
+  }
+}
+
+/* ============================================================
+   7. 図面ツール（直線 / スタンプ / 地図）
+   ============================================================ */
+function addDrawObject(o) {
+  o.set({ __draw: true });
+  canvas.add(o);
+  pageDraw[state.page].push(o);
+  undoStack.push({ page: state.page, obj: o });
+  canvas.setActiveObject(o);
+  canvas.requestRenderAll();
+}
+
+function setupLineTool() {
+  let start = null, preview = null;
+  canvas.on("mouse:down", (e) => {
+    if (state.tool !== "line") return;
+    const p = canvas.getPointer(e.e);
+    start = p;
+    preview = new fabric.Line([p.x, p.y, p.x, p.y], {
+      stroke: "#111", strokeWidth: 4, selectable: false, evented: false
+    });
+    canvas.add(preview);
+  });
+  canvas.on("mouse:move", (e) => {
+    if (state.tool !== "line" || !start || !preview) return;
+    const p = canvas.getPointer(e.e);
+    let x = p.x, y = p.y;
+    if (e.e.shiftKey) {                       // Shiftで水平/垂直
+      if (Math.abs(x - start.x) > Math.abs(y - start.y)) y = start.y; else x = start.x;
+    }
+    preview.set({ x2: x, y2: y });
+    canvas.requestRenderAll();
+  });
+  canvas.on("mouse:up", (e) => {
+    if (state.tool !== "line" || !start || !preview) return;
+    const x1 = preview.x1, y1 = preview.y1, x2 = preview.x2, y2 = preview.y2;
+    canvas.remove(preview);
+    start = null; preview = null;
+    if (Math.hypot(x2 - x1, y2 - y1) < 6) { canvas.requestRenderAll(); return; }
+    addDrawObject(new fabric.Line([x1, y1, x2, y2], {
+      stroke: "#111", strokeWidth: 4, strokeLineCap: "round"
+    }));
+  });
+}
+
+/* --- スタンプ定義（2枚目の公式凡例に合わせた記号）--- */
+const STAMPS = [
+  { id:"denryoku", label:"電力柱",   glyph:"◐", make: () => stampCircle("", true) },
+  { id:"kyaku",    label:"お客さま柱", glyph:"○", make: () => stampCircle("", false) },
+  { id:"ntt",      label:"NTT柱",    glyph:"〒", make: () => stampCircle("〒", false) },
+  { id:"wh",       label:"計器 WH",  glyph:"WH", make: () => stampBox("WH", 46, 30) },
+  { id:"hikikomi", label:"引込点",   glyph:"▼", make: () => stampTriangle() },
+  { id:"bunden",   label:"分電盤",   glyph:"▤", make: () => stampBox("分電盤", 74, 30) },
+  { id:"sb",       label:"SB（容量）", glyph:"SB", make: () => {
+      const a = prompt("電力SBの容量（A）", state.values.sbAmp || (state.values.ampNew || "40").replace(/[^0-9]/g, ""));
+      return a === null ? null : stampBox("SB " + a + "A", 60, 30); } },
+  { id:"elb",      label:"ELB（容量）", glyph:"E",  make: () => {
+      const a = prompt("漏電遮断器ELBの容量（A）", state.values.elcbA || "50");
+      return a === null ? null : stampBox("ELB " + a + "A", 66, 30); } },
+  { id:"br",       label:"分岐B",     glyph:"B",  make: () => {
+      const a = prompt("分岐ブレーカーの容量（A）", "20");
+      return a === null ? null : stampBranch(a); } },
+  { id:"load",     label:"負荷（丸）", glyph:"◯", make: () => {
+      const t = prompt("負荷の名称と容量（例 IH 5.8kW）", "IH 5.8kW");
+      return t === null ? null : stampLoad(t); } },
+  { id:"wire",     label:"配線種類", glyph:"CV", make: () => {
+      const t = prompt("配線の種類（例 CV22-3c / DV2.6×2 / CVT60-3c）", "CV22-3c");
+      return t === null ? null : stampNote(t); } },
+  { id:"earth",    label:"D種接地",  glyph:"⏚", make: () => stampEarth() },
+  { id:"tatemono", label:"建物外枠", glyph:"⌂", make: () => stampBuilding() },
+  { id:"note",     label:"注記",     glyph:"文", make: () => stampNote("注記") }
+];
+const K = 1.6; // スタンプ基準倍率（描画px）
+
+function stampCircle(txt, half) {
+  const r = 15 * K;
+  const parts = [ new fabric.Circle({
+      radius: r, left: -r, top: -r, fill: "#fff", stroke: "#111", strokeWidth: 2.4,
+      originX:"left", originY:"top" }) ];
+  if (half) {
+    parts.push(new fabric.Path(
+      "M 0 " + (-r) + " A " + r + " " + r + " 0 0 1 0 " + r + " Z",
+      { fill: "#111", left: 0, top: -r, originX:"left", originY:"top" }));
+  }
+  if (txt) {
+    parts.push(new fabric.Text(txt, {
+      fontSize: r * 1.15, fontFamily: '"Hiragino Sans",sans-serif', fill: "#111",
+      originX: "center", originY: "center", left: 0, top: 0 }));
+  }
+  return new fabric.Group(parts, { originX:"center", originY:"center" });
+}
+function stampBox(txt, w, h) {
+  w *= K; h *= K;
+  return new fabric.Group([
+    new fabric.Rect({ width: w, height: h, fill: "#fff", stroke: "#111", strokeWidth: 2.4,
+                      left:-w/2, top:-h/2, originX:"left", originY:"top" }),
+    new fabric.Text(txt, { fontSize: h * 0.55, fontFamily: '"Hiragino Sans",sans-serif',
+                      fill: "#111", originX:"center", originY:"center", left:0, top:0 })
+  ], { originX:"center", originY:"center" });
+}
+function stampTriangle() {
+  const s = 26 * K;
+  return new fabric.Group([
+    new fabric.Triangle({ width: s, height: s, fill: "#d32f2f", angle: 180,
+                          left:0, top:0, originX:"center", originY:"center" }),
+    new fabric.Text("引込", { fontSize: 11 * K, fontFamily:'"Hiragino Sans",sans-serif',
+                          fill:"#d32f2f", originX:"center", originY:"top", left:0, top:s*0.6 })
+  ], { originX:"center", originY:"center" });
+}
+function stampEarth() {
+  const u = 5 * K;
+  const mk = (w, y) => new fabric.Line([-w, y, w, y],
+    { stroke:"#111", strokeWidth: 2.4, originX:"center", originY:"center" });
+  return new fabric.Group([
+    new fabric.Line([0, -4*u, 0, 0], { stroke:"#111", strokeWidth:2.4, originX:"center", originY:"center" }),
+    mk(4*u, 0), mk(2.6*u, 1.6*u), mk(1.2*u, 3.2*u)
+  ], { originX:"center", originY:"center" });
+}
+function stampBuilding() {
+  const w = 110 * K, h = 78 * K;
+  return new fabric.Rect({
+    width: w, height: h, fill: "rgba(255,255,255,0.0)", stroke: "#111",
+    strokeWidth: 2.4, strokeDashArray: [9, 6], originX:"center", originY:"center"
+  });
+}
+/* 分岐ブレーカー：小さな箱に「B」、下に容量 */
+function stampBranch(amp) {
+  const w = 18 * K, h = 18 * K;
+  return new fabric.Group([
+    new fabric.Rect({ width: w, height: h, fill:"#fff", stroke:"#111", strokeWidth:2.4,
+                      left:-w/2, top:-h/2, originX:"left", originY:"top" }),
+    new fabric.Text("B", { fontSize: h*0.62, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
+                      originX:"center", originY:"center", left:0, top:0 }),
+    new fabric.Text(amp + "A", { fontSize: 8*K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
+                      originX:"center", originY:"top", left:0, top:h/2 + 2 })
+  ], { originX:"center", originY:"center" });
+}
+/* 負荷：丸の中に名称と容量（スペースで改行） */
+function stampLoad(txt) {
+  const r = 15 * K;
+  const lines = String(txt).trim().split(/\s+/).join("\n");
+  return new fabric.Group([
+    new fabric.Circle({ radius:r, fill:"#fff", stroke:"#111", strokeWidth:2.4,
+                        left:-r, top:-r, originX:"left", originY:"top" }),
+    new fabric.Text(lines, { fontSize: 7.5*K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
+                        originX:"center", originY:"center", left:0, top:0, textAlign:"center", lineHeight:1.05 })
+  ], { originX:"center", originY:"center" });
+}
+function stampNote(txt) {
+  return new fabric.IText(txt, {
+    fontSize: 15 * K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
+    originX:"center", originY:"center"
+  });
+}
+
+/* ------------------------------------------------------------
+   単線結線図テンプレート
+   「電気使用申込書の記入方法」p.9 の記載例（主開閉器契約の場合）に沿って、
+   引込線 → WH → 電力SB → ELB → 母線 → 分岐B → 負荷 の構成を枠内に一発で置く。
+   数値と負荷名は入力パネルから。置いたあとは個別に動かせる。
+   ------------------------------------------------------------ */
+const sldTpl = { inlet: "DV2.6×2", sb: "", elb: "", n: 6, branchA: "20", loads: "", areaId: "" };
+
+function placeSldTemplate(areaId, o) {
+  const area = FORM.areas.find(a => a.id === areaId);
+  if (!area) { toast("単線結線図の枠がありません"); return; }
+  const R = area.rect;
+  const px = v => P2C(v);
+  const font = '"Hiragino Sans","Noto Sans JP",sans-serif';
+  const LW = P2C(0.9);
+  const objs = [];
+  const cx = R[0] + R[2] / 2;
+
+  const box = (x, y, w, h, txt, fs) => new fabric.Group([
+    new fabric.Rect({ width: px(w), height: px(h), fill: "#fff", stroke: "#111", strokeWidth: LW,
+                      originX: "center", originY: "center", left: 0, top: 0 }),
+    new fabric.Text(txt, { fontSize: px(fs), fontFamily: font, fill: "#111",
+                      originX: "center", originY: "center", left: 0, top: 0 })
+  ], { left: px(x), top: px(y), originX: "center", originY: "center" });
+  const line = (x1, y1, x2, y2) => new fabric.Line([px(x1), px(y1), px(x2), px(y2)],
+    { stroke: "#111", strokeWidth: LW, strokeLineCap: "round" });
+  const text = (x, y, txt, fs, ox) => new fabric.Text(txt, {
+    left: px(x), top: px(y), fontSize: px(fs), fontFamily: font, fill: "#111",
+    originX: ox || "center", originY: "center" });
+  const circle = (x, y, r, txt, fs) => new fabric.Group([
+    new fabric.Circle({ radius: px(r), fill: "#fff", stroke: "#111", strokeWidth: LW,
+                        originX: "center", originY: "center", left: 0, top: 0 }),
+    new fabric.Text(txt, { fontSize: px(fs), fontFamily: font, fill: "#111", textAlign: "center",
+                        lineHeight: 1.05, originX: "center", originY: "center", left: 0, top: 0 })
+  ], { left: px(x), top: px(y), originX: "center", originY: "center" });
+
+  // 幹線（上から順）
+  let y = R[1] + 9;
+  objs.push(text(cx + 3, y + 2, o.inlet || "", 5.2, "left"));   // 引込線の種類は線の脇に
+  objs.push(line(cx, y - 5, cx, y + 12));
+  y += 20; objs.push(box(cx, y, 22, 13, "WH", 6.5));             // 計器
+  objs.push(line(cx, y + 6.5, cx, y + 19));
+  y += 26; objs.push(box(cx, y, 32, 13, "SB " + (o.sb || "") + "A", 6));   // 電力SB
+  objs.push(line(cx, y + 6.5, cx, y + 19));
+  y += 26; objs.push(box(cx, y, 36, 13, "ELB " + (o.elb || "") + "A", 6)); // 漏電遮断器
+  objs.push(line(cx, y + 6.5, cx, y + 20));
+  y += 27;                                                        // 母線
+
+  const n = Math.max(1, Math.min(12, parseInt(o.n, 10) || 1));
+  const pitch = Math.min(24, (R[2] - 24) / Math.max(n, 1));
+  const x0 = cx - pitch * (n - 1) / 2;
+  if (n > 1) objs.push(line(x0, y, x0 + pitch * (n - 1), y));
+  const loads = String(o.loads || "").split(/[,，、]/).map(t => t.trim()).filter(Boolean);
+  for (let i = 0; i < n; i++) {
+    const x = x0 + pitch * i;
+    objs.push(line(x, y, x, y + 8));
+    objs.push(box(x, y + 13.5, 11, 11, "B", 6));
+    objs.push(text(x, y + 23.5, (o.branchA || "") + "A", 4.2));
+    if (loads[i]) {
+      // 丸の中は4文字で折り返す（「コンセント」など長い名称が切れないように）
+      const lines = loads[i].split(/\s+/).flatMap(t => t.match(/.{1,4}/g) || [t]);
+      objs.push(line(x, y + 19, x, y + 34));
+      objs.push(circle(x, y + 44, 9, lines.join("\n"), 4.0));
+    }
+  }
+
+  objs.forEach(ob => { ob.set({ __draw: true, selectable: state.tool === "select" }); canvas.add(ob); pageDraw[area.page].push(ob); });
+  undoStack.push({ page: area.page, obj: objs });
+  if (state.page !== area.page) showPage(area.page).then(() => zoomToArea(area.id));
+  else zoomToArea(area.id);
+  canvas.requestRenderAll();
+  toast("記載例どおりに配置しました（分岐" + n + "回路）。個別に動かせます");
+}
+
+function placeStamp(def) {
+  const o = def.make();
+  if (!o) return;
+  // 現在のページの主要エリア中央、なければ画面中央
+  const area = FORM.areas.find(a => a.page === state.page);
+  let cx = canvas.getWidth() / 2, cy = canvas.getHeight() / 2;
+  if (area) {
+    cx = P2C(area.rect[0] + area.rect[2] / 2);
+    cy = P2C(area.rect[1] + area.rect[3] / 2);
+  }
+  o.set({ left: cx, top: cy, originX:"center", originY:"center" });
+  o.setCoords();
+  addDrawObject(o);
+  if (area && state.zoomedArea !== area.id) zoomToArea(area.id);
+  toast(def.label + " を置きました（ドラッグで移動）");
+}
+
+/* --- 国土地理院 地図 --- */
+const GSI_ATTR = "地理院タイル";
+let mapUnlocked = false;   // 地図を動かせる状態か
+
+/* 地図・写真の背景だけをまとめてロック／解除する。
+   固定しておかないと、スタンプを置こうとして地図を掴んでしまう。 */
+function setMapLock(unlock) {
+  mapUnlocked = !!unlock;
+  pageDraw.forEach(list => list.forEach(o => {
+    if (!o.__mapArea || o.__mapNote) return;   // 出典表記は常に固定
+    o.set({ selectable: mapUnlocked, evented: mapUnlocked,
+            hasControls: mapUnlocked, hasBorders: mapUnlocked });
+  }));
+  if (!mapUnlocked) canvas.discardActiveObject();
+  canvas.requestRenderAll();
+  toast(mapUnlocked ? "地図を動かせます（ドラッグ／四隅で拡大縮小）" : "地図を固定しました");
+}
+function lon2tile(lon, z) { return (lon + 180) / 360 * Math.pow(2, z); }
+function lat2tile(lat, z) {
+  const r = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z);
+}
+function loadImg(src) {
+  return new Promise((res) => {
+    const im = new Image();
+    im.crossOrigin = "anonymous";
+    im.onload = () => res(im);
+    im.onerror = () => res(null);
+    im.src = src;
+  });
+}
+async function geocode(q) {
+  const url = "https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(q);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("住所検索に失敗しました (" + r.status + ")");
+  const j = await r.json();
+  if (!j || !j.length) return null;
+  const c = j[0].geometry.coordinates;
+  return { lon: c[0], lat: c[1], title: (j[0].properties && j[0].properties.title) || q };
+}
+/* タイルの供給元。max は実際にタイルが存在する最大ズーム。
+   地理院タイルは全レイヤーが z18 で打ち止め（z19以降は404）。
+   それより寄りたいときは z18 のタイルを拡大して描く（地理院地図自身も同じ方式）。 */
+const TILE_SRC = {
+  pale: { max: 18, attr: "地理院タイル（淡色地図）",
+          url: (z,x,y) => "https://cyberjapandata.gsi.go.jp/xyz/pale/"+z+"/"+x+"/"+y+".png" },
+  std:  { max: 18, attr: "地理院タイル（標準地図）",
+          url: (z,x,y) => "https://cyberjapandata.gsi.go.jp/xyz/std/"+z+"/"+x+"/"+y+".png" },
+  seamlessphoto: { max: 18, attr: "地理院タイル（シームレス写真）",
+          url: (z,x,y) => "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/"+z+"/"+x+"/"+y+".jpg" },
+};
+/* OpenStreetMap の z19 も試したが、日本の住宅地は建物が入っておらず
+   道路だけの白紙同然だったため採用していない。 */
+
+/* 緯度と枠の幅から、その縮尺で何メートル分が写るかを返す */
+function spanMeters(lat, z, wPx) {
+  return wPx * 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z);
+}
+
+async function buildMapCanvas(lat, lon, z, wPx, hPx, style) {
+  const TS = 256;
+  const src = TILE_SRC[style] || TILE_SRC.pale;
+  const Z = Math.min(z, src.max);
+  const over = Math.pow(2, z - Z);          // 1 / 2 / 4 / 8 倍に引き伸ばす
+  const bw = Math.ceil(wPx / over), bh = Math.ceil(hPx / over);
+
+  const cx = lon2tile(lon, Z) * TS, cy = lat2tile(lat, Z) * TS;
+  const x0 = cx - bw / 2, y0 = cy - bh / 2;
+  const tx0 = Math.floor(x0 / TS), ty0 = Math.floor(y0 / TS);
+  const tx1 = Math.floor((x0 + bw) / TS), ty1 = Math.floor((y0 + bh) / TS);
+
+  const base = document.createElement("canvas");
+  base.width = bw; base.height = bh;
+  const bctx = base.getContext("2d");
+  bctx.fillStyle = "#fff"; bctx.fillRect(0, 0, bw, bh);
+  const jobs = [];
+  for (let tx = tx0; tx <= tx1; tx++) {
+    for (let ty = ty0; ty <= ty1; ty++) {
+      jobs.push(loadImg(src.url(Z, tx, ty)).then(im => {
+        if (im) bctx.drawImage(im, Math.round(tx * TS - x0), Math.round(ty * TS - y0), TS, TS);
+      }));
+    }
+  }
+  await Promise.all(jobs);
+
+  const c = document.createElement("canvas");
+  c.width = Math.round(wPx); c.height = Math.round(hPx);
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  if ("imageSmoothingQuality" in ctx) ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(base, 0, 0, bw, bh, 0, 0, c.width, c.height);
+
+  // 出典表記はここには焼き込まない。余白ごと取り込むと枠の外に出て
+  // クリップで消えてしまうため、貼るときに枠の内側へ別途置く。
+  c.__attr = src.attr;
+  c.__mPerPx = spanMeters(lat, z, 1);
+  return c;
+}
+
+/* 枠に出る範囲の実距離から出典表記の文字列を作る */
+function mapNoteText(mapCanvas, frameWpx) {
+  const m = Math.round((mapCanvas.__mPerPx || 0) * frameWpx);
+  return "出典：" + (mapCanvas.__attr || GSI_ATTR) + "　この枠 約" + m + "m";
+}
+/* 枠ぴったりに取り込むと、目的の家が端で見切れたときに寄せる余地が無い。
+   枠の外側も取り込んでおき、貼ったあともドラッグで動かせるようにする。 */
+const OVERSCAN = 1.45;
+
+/* 貼る前の下見。ここで位置を合わせてから確定する。 */
+const mapPrev = {
+  areaId: null, lat: null, lon: null, zoom: 19, style: null,
+  canvas: null, title: "", query: "", rot: 0, busy: false, seq: 0
+};
+
+function tile2lon(tx, z) { return tx / Math.pow(2, z) * 360 - 180; }
+function tile2lat(ty, z) {
+  const n = Math.PI - 2 * Math.PI * ty / Math.pow(2, z);
+  return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+/* 画面上で dx,dy px ずらしたときの新しい中心 */
+function panCenter(lat, lon, z, dxPx, dyPx) {
+  const TS = 256;
+  const x = lon2tile(lon, z) * TS - dxPx;
+  const y = lat2tile(lat, z) * TS - dyPx;
+  return { lon: tile2lon(x / TS, z), lat: tile2lat(y / TS, z) };
+}
+
+function prevArea() {
+  return FORM.areas.find(a => a.id === mapPrev.areaId) || FORM.areas[0];
+}
+
+/* 下見用の画像を作り直す（貼るのと同じ内容・同じ解像度） */
+async function renderPreview() {
+  const area = prevArea();
+  if (!area || mapPrev.lat == null) return;
+  const my = ++mapPrev.seq;
+  const R = area.rect.map(P2C);
+  // 回転させても枠の四隅が欠けないよう、角度に応じて取り込む範囲を広げる
+  const th = (mapPrev.rot || 0) * Math.PI / 180;
+  const c_ = Math.abs(Math.cos(th)), s_ = Math.abs(Math.sin(th));
+  const needW = R[2] * c_ + R[3] * s_, needH = R[2] * s_ + R[3] * c_;
+  const W = Math.round(needW * OVERSCAN), H = Math.round(needH * OVERSCAN);
+  const c = await buildMapCanvas(mapPrev.lat, mapPrev.lon, mapPrev.zoom, W, H, mapPrev.style);
+  if (my !== mapPrev.seq) return;          // 連打されたら古い結果は捨てる
+  mapPrev.canvas = c;
+  paintPreview();
+}
+
+/* 画面上の移動量(dx,dy)を、回転した地図の軸に直す */
+function unrotate(dx, dy) {
+  const th = (mapPrev.rot || 0) * Math.PI / 180;
+  return { dx: dx * Math.cos(th) + dy * Math.sin(th), dy: -dx * Math.sin(th) + dy * Math.cos(th) };
+}
+
+/* 下見キャンバスに、実際に用紙へ出る範囲の枠を重ねて描く */
+function paintPreview(shiftX, shiftY) {
+  const el2 = document.getElementById("mapPrevCv");
+  if (!el2 || !mapPrev.canvas) return;
+  const area = prevArea(); if (!area) return;
+  const src = mapPrev.canvas;
+  const R = area.rect.map(P2C);
+  const iw = R[2], ih = R[3];                       // 用紙に出る枠（キャンバスpx）
+  const vw = Math.round(iw * OVERSCAN), vh = Math.round(ih * OVERSCAN);
+  el2.width = vw; el2.height = vh;
+  const g = el2.getContext("2d");
+  g.fillStyle = "#e8eaee"; g.fillRect(0, 0, vw, vh);
+
+  // 地図を中心で回転させて描く（ドラッグ中は shift だけずらす）
+  const cx = vw / 2, cy = vh / 2;
+  g.save();
+  g.translate(cx + (shiftX || 0), cy + (shiftY || 0));
+  g.rotate((mapPrev.rot || 0) * Math.PI / 180);
+  g.drawImage(src, -src.width / 2, -src.height / 2);
+  g.restore();
+
+  const x = (vw - iw) / 2, y = (vh - ih) / 2;
+  g.save();
+  g.fillStyle = "rgba(255,255,255,.55)";          // 枠の外側は白くかぶせる
+  g.fillRect(0, 0, vw, y);
+  g.fillRect(0, y + ih, vw, vh - y - ih);
+  g.fillRect(0, y, x, ih);
+  g.fillRect(x + iw, y, vw - x - iw, ih);
+  g.strokeStyle = "#c62828"; g.lineWidth = 3; g.setLineDash([9, 6]);
+  g.strokeRect(x, y, iw, ih);
+  // 中心の十字（目的の家をここに合わせる）
+  g.setLineDash([]); g.strokeStyle = "rgba(198,40,40,.9)"; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(cx - 14, cy); g.lineTo(cx + 14, cy);
+  g.moveTo(cx, cy - 14); g.lineTo(cx, cy + 14); g.stroke();
+  // 北の向き（回転していると分かるように）
+  if (mapPrev.rot) {
+    g.save(); g.translate(x + 22, y + 22); g.rotate((mapPrev.rot || 0) * Math.PI / 180);
+    g.strokeStyle = "#c62828"; g.fillStyle = "#c62828"; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(0, 12); g.lineTo(0, -12); g.stroke();
+    g.beginPath(); g.moveTo(0, -14); g.lineTo(-5, -5); g.lineTo(5, -5); g.closePath(); g.fill();
+    g.font = "bold 11px sans-serif"; g.textAlign = "center"; g.fillText("N", 0, -17);
+    g.restore();
+  }
+  // 出典は枠の内側（実際に用紙へ出る位置）に表示する
+  const note = mapNoteText(src, iw);
+  g.font = "12px sans-serif"; g.textAlign = "right";
+  const tw = g.measureText(note).width + 8;
+  g.fillStyle = "rgba(255,255,255,.85)";
+  g.fillRect(x + iw - tw, y + ih - 17, tw, 16);
+  g.fillStyle = "#333"; g.fillText(note, x + iw - 4, y + ih - 5);
+  g.restore();
+}
+
+/* 下見の内容をそのまま用紙に貼る */
+async function commitMap() {
+  const area = prevArea();
+  if (!area || !mapPrev.canvas) { toast("先に住所を入れて下見を出してください"); return; }
+  const R = area.rect.map(P2C);
+  const W = mapPrev.canvas.width, H = mapPrev.canvas.height;
+
+  pageDraw[area.page]
+    .filter(o => o.__mapArea === area.id)
+    .forEach(o => { canvas.remove(o); pageDraw[area.page].splice(pageDraw[area.page].indexOf(o), 1); });
+
+  // 枠の中心に中心を合わせて置き（回転の軸＝枠の中心）、枠でクリップする
+  const img = new fabric.Image(mapPrev.canvas, {
+    left: R[0] + R[2] / 2, top: R[1] + R[3] / 2,
+    originX: "center", originY: "center",
+    angle: mapPrev.rot || 0,
+    opacity: state.mapOpacity, __mapArea: area.id
+  });
+  img.set("clipPath", new fabric.Rect({
+    left: R[0], top: R[1], width: R[2], height: R[3],
+    absolutePositioned: true, originX: "left", originY: "top"
+  }));
+  canvas.add(img);
+  canvas.sendToBack(img);
+  pageDraw[area.page].push(img);
+  undoStack.push({ page: area.page, obj: img });
+
+  // 出典とスケールは枠の内側に固定する（地図を動かしても付いて回らない）
+  const note = new fabric.Text(mapNoteText(mapPrev.canvas, R[2]), {
+    fontSize: P2C(4.6), fontFamily: '"Hiragino Sans",sans-serif',
+    fill: "#333", backgroundColor: "rgba(255,255,255,.8)",
+    originX: "right", originY: "bottom",
+    left: R[0] + R[2] - P2C(1.5), top: R[1] + R[3] - P2C(1),
+    selectable: false, evented: false,
+    __mapArea: area.id, __mapNote: true
+  });
+  canvas.add(note);
+  pageDraw[area.page].push(note);
+
+  if (state.page !== area.page) await showPage(area.page);
+  setMapLock(true);
+  canvas.setActiveObject(img);
+  canvas.requestRenderAll();
+  // そのまま描き込めるよう、枠を画面いっぱいに拡大しておく
+  setTimeout(() => zoomToArea(area.id), 60);
+  toast(area.label + "に貼って拡大しました。このまま描き込めます");
+}
+
+/* 住所から下見を出す */
+async function previewFromAddress(areaId, query, zoom) {
+  if (!query) { toast("住所を入れてください"); return; }
+  busy(true, "地図を探しています…");
+  try {
+    const g = await geocode(query);
+    if (!g) {
+      toast("「" + query + "」が見つかりません。番地を外して町名までで試してください");
+      return;
+    }
+    mapPrev.query = query;
+    mapPrev.areaId = areaId; mapPrev.lat = g.lat; mapPrev.lon = g.lon;
+    mapPrev.zoom = zoom; mapPrev.style = state.mapStyle; mapPrev.title = g.title;
+    await renderPreview();
+    renderSide();
+    toast(g.title + "　下見を出しました。動かして枠に収めてください");
+  } catch (e) {
+    toast(e.message || "地図の取得に失敗しました");
+  } finally { busy(false); }
+}
+
+/* --- 写真背景 --- */
+function placePhoto(file, areaId) {
+  const area = FORM.areas.find(a => a.id === areaId);
+  const fr = new FileReader();
+  fr.onload = () => {
+    fabric.Image.fromURL(fr.result, (img) => {
+      const R = area ? area.rect.map(P2C) : [0, 0, canvas.getWidth(), canvas.getHeight()];
+      const s = Math.min(R[2] / img.width, R[3] / img.height);
+      img.set({
+        left: R[0] + (R[2] - img.width * s) / 2,
+        top: R[1] + (R[3] - img.height * s) / 2,
+        scaleX: s, scaleY: s, opacity: state.mapOpacity, originX:"left", originY:"top"
+      });
+      if (area) {
+        img.set("clipPath", new fabric.Rect({
+          left: R[0], top: R[1], width: R[2], height: R[3],
+          absolutePositioned: true, originX:"left", originY:"top"
+        }));
+      }
+      addDrawObject(img);
+      canvas.sendToBack(img);
+    });
+  };
+  fr.readAsDataURL(file);
+}
+
+/* ============================================================
+   8. 座標調整モード
+   ============================================================ */
+let calRect = null, calStart = null;
+function setupCalibrateTool() {
+  canvas.on("mouse:down", (e) => {
+    if (!state.calibrate) return;
+    const p = canvas.getPointer(e.e);
+    calStart = p;
+    calRect = new fabric.Rect({
+      left: p.x, top: p.y, width: 1, height: 1,
+      fill: "rgba(198,40,40,.15)", stroke: "#c62828", strokeWidth: 2,
+      selectable: false, evented: false, originX:"left", originY:"top"
+    });
+    canvas.add(calRect);
+  });
+  canvas.on("mouse:move", (e) => {
+    if (!state.calibrate || !calRect || !calStart) return;
+    const p = canvas.getPointer(e.e);
+    calRect.set({
+      left: Math.min(p.x, calStart.x), top: Math.min(p.y, calStart.y),
+      width: Math.abs(p.x - calStart.x), height: Math.abs(p.y - calStart.y)
+    });
+    canvas.requestRenderAll();
+  });
+  canvas.on("mouse:up", () => {
+    if (!state.calibrate || !calRect) return;
+    const r = [calRect.left / SCALE, calRect.top / SCALE,
+               calRect.width / SCALE, calRect.height / SCALE].map(v => Math.round(v * 10) / 10);
+    canvas.remove(calRect); calRect = null; calStart = null;
+    canvas.requestRenderAll();
+    if (r[2] < 2 || r[3] < 2) return;
+    const id = prompt(
+      "この枠に割り当てるフィールドIDを入力してください。\n" +
+      "既存IDなら座標を上書き、新しいIDなら新規追加します。\n\n" +
+      "取得した座標 [x,y,w,h] = [" + r.join(", ") + "]");
+    if (!id) return;
+    let f = fieldById(id);
+    if (f) {
+      f.rect = r;
+      toast(id + " の座標を更新しました");
+    } else {
+      const label = prompt("表示名（フォームのラベル）", id) || id;
+      f = { s: 9, p: state.page, id: id, t: "text", label: label, rect: r, sz: 10 };
+      FORM.fields.push(f);
+      toast(id + " を追加しました（Stepその他に表示）");
+    }
+    drawField(f);
+    renderSide();
+  });
+}
+function exportFieldMap() {
+  const data = { id: FORM.id, name: FORM.name, pages: FORM.pages, areas: FORM.areas, fields: FORM.fields };
+  downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+               FORM.id + "-fieldmap.json");
+  toast("フィールドマップを書き出しました");
+}
+
+/* ============================================================
+   9. 保存・読込・書き出し
+   ============================================================ */
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+function projectJSON() {
+  const draw = pageDraw.map(list => list.map(o => o.toJSON(["__draw", "__mapArea"])));
+  return JSON.stringify({
+    v: 1, form: FORM.id, savedAt: new Date().toISOString(),
+    values: state.values, draw: draw,
+    fieldmap: { areas: FORM.areas, fields: FORM.fields }
+  }, null, 2);
+}
+function saveProject() {
+  const nm = (state.values.contractName || "無題").replace(/[\\/:*?"<>|\s]/g, "_");
+  downloadBlob(new Blob([projectJSON()], { type: "application/json" }),
+               "申込_" + nm + ".json");
+  toast("JSONを保存しました");
+}
+function loadProject(file) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    let d;
+    try { d = JSON.parse(fr.result); }
+    catch (e) { toast("JSONを読めませんでした"); return; }
+    if (d.fieldmap) {
+      if (d.fieldmap.areas) FORM.areas = d.fieldmap.areas;
+      if (d.fieldmap.fields) FORM.fields = d.fieldmap.fields;
+    }
+    state.values = d.values || {};
+    propagateLinks();
+    pageDraw = pageBg.map(() => []);
+    fieldObj = {}; undoStack = [];
+    const drawData = d.draw || [];
+    let pending = 0, done = false;
+    drawData.forEach((list, pi) => {
+      if (!list || !list.length || pi >= pageBg.length) return;
+      pending++;
+      fabric.util.enlivenObjects(list, (objs) => {
+        objs.forEach(o => pageDraw[pi].push(o));
+        if (--pending === 0 && done) finish();
+      });
+    });
+    done = true;
+    if (pending === 0) finish();
+    function finish() {
+      FORM.fields.forEach(f => drawField(f));
+      showPage(0);
+      renderSide();
+      toast("読み込みました");
+    }
+  };
+  fr.readAsText(file);
+}
+
+async function exportAll(kind) {
+  busy(true, "書き出しています…");
+  const keep = state.page;
+  const wasCal = state.calibrate;
+  state.calibrate = false;
+  canvas.discardActiveObject();
+
+  // 記入方法の「黒ボールペン／黒インキで」に合わせ、出力時だけ記入文字と丸囲みを黒にする。
+  // 画面上は見分けやすいよう青・赤のまま。
+  const recolor = [];
+  Object.keys(fieldObj).forEach(id => [].concat(fieldObj[id]).forEach(o => {
+    recolor.push({ o: o, fill: o.fill, stroke: o.stroke });
+    if (o.type === "ellipse") o.set({ stroke: "#111" });
+    else o.set({ fill: "#111" });
+  }));
+  try {
+    const shots = [];
+    for (let i = 0; i < pageBg.length; i++) {
+      busy(true, "書き出しています… " + (i + 1) + " / " + pageBg.length + " ページ");
+      await showPage(i);              // 背景画像の反映を待つ
+      canvas.renderAll();
+      shots.push(canvas.toDataURL({ format: "png", multiplier: 1 }));
+    }
+    if (kind === "png") {
+      shots.forEach((d, i) => setTimeout(() => {
+        const bin = atob(d.split(",")[1]);
+        const buf = new Uint8Array(bin.length);
+        for (let k = 0; k < bin.length; k++) buf[k] = bin.charCodeAt(k);
+        downloadBlob(new Blob([buf], { type: "image/png" }),
+                     "申込書_" + (i + 1) + "ページ.png");
+      }, i * 500));
+      toast("PNGを書き出しました");
+    } else {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit: "pt", format: [PT_W, PT_H], orientation: "portrait" });
+      shots.forEach((d, i) => {
+        if (i) doc.addPage([PT_W, PT_H], "portrait");
+        doc.addImage(d, "PNG", 0, 0, PT_W, PT_H, undefined, "FAST");
+      });
+      const nm = (state.values.contractName || "無題").replace(/[\\/:*?"<>|\s]/g, "_");
+      doc.save("電気使用申込書_" + nm + ".pdf");
+      toast("PDFを書き出しました");
+    }
+  } catch (e) {
+    toast("書き出しに失敗しました: " + e.message);
+  } finally {
+    recolor.forEach(r => r.o.set({ fill: r.fill, stroke: r.stroke }));   // 画面表示の色に戻す
+    state.calibrate = wasCal;
+    await showPage(keep);
+    busy(false);
+  }
+}
+
+/* ---------- 自社情報の記憶 ---------- */
+const LS_KEY = "denki-jisha-v1";
+function saveLocal() {
+  const o = {};
+  FORM.fields.filter(f => f.mem).forEach(f => { if (state.values[f.id]) o[f.id] = state.values[f.id]; });
+  try { localStorage.setItem(LS_KEY, JSON.stringify(o)); } catch (e) {}
+}
+function loadLocal() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    Object.keys(o).forEach(k => { state.values[k] = o[k]; });
+  } catch (e) {}
+}
+
+/* ============================================================
+   10. UI 構築
+   ============================================================ */
+const STEPS = [
+  { n: 1, t: "① お客さま・工事店" },
+  { n: 2, t: "② 契約・設備" },
+  { n: 3, t: "③ 図面" },
+  { n: 4, t: "④ 確認・出力" }
+];
+
+function renderSteps() {
+  const box = $("#steps"); box.innerHTML = "";
+  // 幅が足りないときは横スクロールになるので、選択中のものを画面内に送る
+  setTimeout(() => {
+    const on = box.querySelector("button.on");
+    if (!on || box.scrollWidth <= box.clientWidth) return;
+    // offsetLeft の基準は #steps とは限らないので、画面座標の差で寄せる
+    const bo = box.getBoundingClientRect(), o = on.getBoundingClientRect();
+    if (o.left < bo.left) box.scrollLeft += o.left - bo.left - 8;
+    else if (o.right > bo.right) box.scrollLeft += o.right - bo.right + 8;
+  }, 0);
+  STEPS.forEach(s => box.appendChild(el("button", {
+    class: state.step === s.n ? "on" : "", text: s.t,
+    onclick: () => {
+      state.step = s.n;
+      if (s.n === 3) {
+        // 「2枚目」決め打ちにしない。様式によって図面のページ番号が違う
+        // （A-1は2枚目だが、4ページ様式の付近図は4枚目）。
+        const a = FORM.areas.find(x => x.id === "vicinity") || FORM.areas[0];
+        if (a) showPage(a.page);
+      } else if (s.n <= 2) showPage(0);
+      renderSteps(); renderSide(); renderTools();
+    }
+  })));
+}
+
+function renderTools() {
+  const box = $("#tools"); box.innerHTML = "";
+  const g1 = el("div", { class: "grp" });
+  [["pan", "移動"], ["select", "選択"], ["pen", "ペン"], ["line", "配線"]].forEach(([k, t]) => {
+    g1.appendChild(el("button", {
+      class: state.tool === k ? "on" : "", text: t,
+      onclick: () => {
+        state.tool = k;
+        canvas.isDrawingMode = (k === "pen" && !state.pencilOnly);
+        canvas.selection = (k === "select");
+        // 移動モードと選択モードでは、指でのスクロールをFabricに邪魔させない
+        canvas.allowTouchScrolling = (k === "pan" || k === "select");
+        canvas.upperCanvasEl.style.cursor = (k === "pan") ? "grab" : "default";
+        canvas.upperCanvasEl.style.touchAction = (k === "pan") ? "none" : "";
+        // 地図・写真は固定状態を尊重する（掴んでずらす事故を防ぐ）
+        canvas.forEachObject(o => {
+          if (o.__mapArea) return;
+          if (o.__draw) o.selectable = (k === "select");
+        });
+        renderTools();
+      }
+    }));
+  });
+  box.appendChild(g1);
+
+  const g2 = el("div", { class: "grp" });
+  g2.appendChild(el("button", { text: "取消", onclick: undo }));
+  g2.appendChild(el("button", { text: "削除", onclick: delSelected }));
+  box.appendChild(g2);
+
+  const g3 = el("div", { class: "grp" });
+  g3.appendChild(el("button", { text: "－", onclick: () => { state.zoomedArea = null; setZoom(state.zoom / 1.25); renderTools(); } }));
+  g3.appendChild(el("button", { text: "＋", onclick: () => { state.zoomedArea = null; setZoom(state.zoom * 1.25); renderTools(); } }));
+  g3.appendChild(el("button", {
+    class: state.zoomedArea ? "" : "on", text: "用紙全体",
+    onclick: () => { state.zoomedArea = null; fitZoom(); renderTools(); }
+  }));
+  g3.appendChild(el("span", { class: "grplabel", id: "zoomPct",
+    text: Math.round((state.zoom || 1) * 100) + "%" }));
+  box.appendChild(g3);
+
+  // このページにある図面の枠へ一発で寄る
+  const areas = FORM.areas.filter(a => a.page === state.page);
+  if (areas.length) {
+    const g3b = el("div", { class: "grp" });
+    g3b.appendChild(el("span", { class: "grplabel", text: "拡大" }));
+    areas.forEach(a => g3b.appendChild(el("button", {
+      class: state.zoomedArea === a.id ? "on" : "", text: a.label,
+      onclick: () => zoomToArea(a.id)
+    })));
+    box.appendChild(g3b);
+  }
+
+  const g4 = el("div", { class: "grp" });
+  for (let i = 0; i < pageBg.length; i++) {
+    g4.appendChild(el("button", {
+      class: state.page === i ? "on" : "", text: (i + 1) + "枚目",
+      onclick: () => showPage(i)
+    }));
+  }
+  box.appendChild(g4);
+
+  const g5 = el("div", { class: "grp" });
+  const lab = el("label", {});
+  const cb = el("input", { type: "checkbox" });
+  cb.checked = state.pencilOnly;
+  cb.addEventListener("change", () => {
+    state.pencilOnly = cb.checked;
+    canvas.isDrawingMode = (state.tool === "pen" && !state.pencilOnly);
+    // Pencil優先のときは、指は描かず画面移動に使う
+    canvas.allowTouchScrolling = state.pencilOnly || state.tool === "pan" || state.tool === "select";
+  });
+  lab.appendChild(cb);
+  lab.appendChild(document.createTextNode("Pencilだけで描く（指は画面移動）"));
+  g5.appendChild(lab);
+  box.appendChild(g5);
+
+  if (state.calibrate) {
+    box.appendChild(el("div", { class: "grp" },
+      el("span", { class: "calbadge", text: "座標調整モード：枠をドラッグ" })));
+  }
+}
+
+function undo() {
+  for (let i = undoStack.length - 1; i >= 0; i--) {
+    const u = undoStack[i];
+    undoStack.splice(i, 1);
+    const arr = pageDraw[u.page];
+    [].concat(u.obj).forEach(ob => {            // テンプレートは複数まとめて1手
+      const k = arr.indexOf(ob);
+      if (k >= 0) arr.splice(k, 1);
+      if (u.page === state.page) canvas.remove(ob);
+    });
+    canvas.requestRenderAll();
+    return;
+  }
+  toast("戻せる操作がありません");
+}
+function delSelected() {
+  const objs = canvas.getActiveObjects();
+  if (!objs.length) { toast("削除するものを選んでください"); return; }
+  objs.forEach(o => {
+    canvas.remove(o);
+    const arr = pageDraw[state.page];
+    const k = arr.indexOf(o);
+    if (k >= 0) arr.splice(k, 1);
+  });
+  canvas.discardActiveObject();
+  canvas.requestRenderAll();
+}
+
+/* ---------- 入力パネル ---------- */
+function fieldRow(f) {
+  const wrap = el("div", { class: "f" });
+  const lab = el("label", { text: f.label });
+  if (f.req) lab.appendChild(el("span", { class: "req", text: f.req }));   // 記入方法の記入区分
+  wrap.appendChild(lab);
+
+  if (f.t === "choice") {
+    const chips = el("div", { class: "chips sm" });
+    (f.opts || []).forEach(o => {
+      chips.appendChild(el("button", {
+        class: state.values[f.id] === o.v ? "on" : "", text: o.v,
+        onclick: () => {
+          setValue(f.id, state.values[f.id] === o.v ? "" : o.v);
+          renderSide();
+        }
+      }));
+    });
+    wrap.appendChild(chips);
+
+  } else if (f.t === "check") {
+    const chips = el("div", { class: "chips sm" });
+    chips.appendChild(el("button", {
+      class: state.values[f.id] ? "on" : "", text: state.values[f.id] ? "✓ " + f.label : f.label,
+      onclick: () => { setValue(f.id, state.values[f.id] ? "" : "1"); renderSide(); }
+    }));
+    wrap.appendChild(chips);
+
+  } else if (f.t === "multi") {
+    const ta = el("textarea", {});
+    ta.value = state.values[f.id] || "";
+    ta.addEventListener("input", () => setValue(f.id, ta.value, { silent: true }));
+    wrap.appendChild(ta);
+
+  } else if (f.t === "grid") {
+    const inp = el("input", { type: "text", placeholder: f.ph || "" });
+    inp.setAttribute("inputmode", "numeric");
+    inp.value = state.values[f.id] || "";
+    const take = () => {
+      // 数字とハイフンだけ。全角は半角に直す。
+      const c = inp.value
+        .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+        .replace(/[ー－‐−]/g, "-")
+        .replace(/[^0-9-]/g, "");
+      if (c !== inp.value) inp.value = c;
+      return c;
+    };
+    inp.addEventListener("input", () => setValue(f.id, take(), { silent: true }));
+    inp.addEventListener("change", () => setValue(f.id, take()));
+    wrap.appendChild(inp);
+    const n = f.segs.reduce((a, sg) => a + sg[2], 0);
+    wrap.appendChild(el("p", { class: "hint",
+      text: "用紙は" + n + "マス（" + f.segs.map(sg => sg[2]).join("・") + "）。ハイフンで区切って入れてください。" }));
+
+  } else {
+    const inp = el("input", { type: "text" });
+    if (f.maxlen) inp.setAttribute("maxlength", String(f.maxlen));
+    // digits:true の欄は「番号」なので数字しか入らないようにする。
+    // （お客さま番号の市町村・町字などは地名ではなくコードの一部）
+    if (f.digits) { inp.setAttribute("inputmode", "numeric"); inp.setAttribute("pattern", "[0-9]*"); }
+    else if (f.numish) { inp.setAttribute("inputmode", "decimal"); }
+    inp.value = state.values[f.id] || "";
+    const take = () => {
+      let v = inp.value;
+      if (f.digits) {
+        const c = v.replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+                   .replace(/[^0-9]/g, "");
+        if (c !== v) { inp.value = c; }
+        v = c;
+      }
+      return v;
+    };
+    inp.addEventListener("input", () => setValue(f.id, take(), { silent: true }));
+    inp.addEventListener("change", () => setValue(f.id, take()));
+    wrap.appendChild(inp);
+  }
+  return wrap;
+}
+
+/* 入力欄は用紙の並び（上から下、左から右）に揃える。
+   定義順だと、あとから足した欄が先頭に出てきて探しづらい。 */
+function fpos(f) {
+  if (f.rect) return [f.p, f.rect[1], f.rect[0]];
+  if (f.segs) return [f.p, f.y, f.segs[0][0]];
+  if (f.opts && f.opts.length) return [f.p, f.opts[0].rect[1], f.opts[0].rect[0]];
+  return [f.p, 9999, 9999];
+}
+function inPaperOrder(list) {
+  return list.slice().sort((a, b) => {
+    const A = fpos(a), B = fpos(b);
+    return (A[0] - B[0]) || (A[1] - B[1]) || (A[2] - B[2]);
+  });
+}
+
+function card(title, bodyNodes) {
+  const c = el("card" in window ? "div" : "div", { class: "card" });
+  c.appendChild(el("h3", { text: title }));
+  const b = el("div", { class: "body" });
+  [].concat(bodyNodes).forEach(n => n && b.appendChild(n));
+  c.appendChild(b);
+  return c;
+}
+
+function renderSide() {
+  const side = $("#side"); side.innerHTML = "";
+
+  if (state.step === 1) {
+    // 所属はIDの前置詞ではなく明示リストで決める（contractName が co* に
+    // 巻き込まれて消える、といった事故を防ぐため）
+    const G_CONTACT = ["custKana","custName","custTel1","custTel2","custTel3","custPostal","custAddr"];
+    const G_CUSTNO = ["custNo"];
+    side.appendChild(card("お客さま", inPaperOrder(FORM.fields
+      .filter(f => f.s === 1 && !f.mem && G_CONTACT.indexOf(f.id) < 0 && G_CUSTNO.indexOf(f.id) < 0))
+      .map(fieldRow)));
+    const noBody = inPaperOrder(FORM.fields.filter(f => G_CUSTNO.indexOf(f.id) >= 0)).map(fieldRow);
+    if (noBody.length) {
+      noBody.unshift(el("p", { class: "hint",
+        text: "用紙の「回数／営業所／市町村／町字…」は地名ではなく、お客さま番号を分割したマスです。検針票（電気ご使用量のお知らせ）の番号を続けて入れれば、2・3・2・2・2・3・2・1桁に自動で割り振られます。" }));
+      side.appendChild(card("お客さま番号", noBody));
+    }
+    side.appendChild(card("お客さま連絡先", inPaperOrder(FORM.fields
+      .filter(f => G_CONTACT.indexOf(f.id) >= 0)).map(fieldRow)));
+    const memBody = inPaperOrder(FORM.fields.filter(f => f.s === 1 && f.mem)).map(fieldRow);
+    memBody.push(el("p", { class: "hint", text: "この欄はこの端末に自動保存され、次回も入ったままになります。" }));
+    side.appendChild(card("申込工事会社（自社情報）", memBody));
+
+  } else if (state.step === 2) {
+    side.appendChild(card("契約容量（アンペア）", [ampChips(),
+      el("p", { class: "hint", text: "40A以上を選ぶと供給方式が自動で単相3線式になります。" })]));
+    side.appendChild(card("契約・設備", inPaperOrder(FORM.fields.filter(f => f.s === 2)).map(fieldRow)));
+
+  } else if (state.step === 3) {
+    side.appendChild(card("付近図に地図を敷く", mapPanel()));
+    if (FORM.areas.some(a => a.id.indexOf("sld") === 0)) {
+      side.appendChild(card("単線結線図（記載例どおりに配置）", sldPanel()));
+    }
+    side.appendChild(card("凡例スタンプ", [stampPanel(),
+      el("p", { class: "hint", text: "タップで図面エリアの中央に出ます。ドラッグで移動、四隅で拡大縮小・回転。SB・ELB・分岐B・負荷は容量や名称を聞いてから置きます。" })]));
+    side.appendChild(card("図面ページの記入欄", inPaperOrder(FORM.fields.filter(f => f.s === 3)).map(fieldRow)));
+
+  } else if (state.step === 4) {
+    side.appendChild(card("書き出し", [
+      el("div", { class: "rowbtn" }, [
+        el("button", { class: "btn p", text: "PDFで書き出す", onclick: () => exportAll("pdf") }),
+        el("button", { class: "btn", text: "PNGで書き出す", onclick: () => exportAll("png") })
+      ]),
+      el("p", { class: "hint", text: "A4・180dpi相当のラスタPDFです。そのまま印刷・FAX送信できます。" })
+    ]));
+    side.appendChild(card("保存・読込", [
+      el("div", { class: "rowbtn" }, [
+        el("button", { class: "btn", text: "JSONで保存", onclick: saveProject }),
+        el("button", { class: "btn", text: "JSONを読込", onclick: () => $("#projFile").click() })
+      ])
+    ]));
+    side.appendChild(card("入力内容の確認", summaryTable()));
+    side.appendChild(card("座標調整（上級）", [
+      el("div", { class: "rowbtn" }, [
+        el("button", {
+          class: state.calibrate ? "btn p" : "btn",
+          text: state.calibrate ? "調整モードを終了" : "座標調整モード",
+          onclick: () => { state.calibrate = !state.calibrate; renderSide(); renderTools(); }
+        }),
+        el("button", { class: "btn", text: "フィールドマップ書出", onclick: exportFieldMap })
+      ]),
+      el("p", { class: "hint", text: "文字の位置がズレている・欄が足りないときに使います。用紙の上で欄をドラッグで囲むとIDを聞かれ、そのまま座標が入ります。書き出したJSONを保管しておけば、次回はJSON読込で復元できます。" })
+    ]));
+  }
+
+  // 座標調整で追加した「その他」フィールド
+  const extra = FORM.fields.filter(f => f.s === 9);
+  if (extra.length) side.appendChild(card("追加した欄", extra.map(fieldRow)));
+}
+
+function ampChips() {
+  const box = el("div", { class: "chips" });
+  // 用紙側に「Ａ」が印刷済みなので、記入するのは数字だけにする
+  ["10", "15", "20", "30", "40", "50", "60"].forEach(a => {
+    box.appendChild(el("button", {
+      class: state.values.ampNew === a ? "on" : "", text: a + "A",
+      onclick: () => {
+        setValue("ampNew", state.values.ampNew === a ? "" : a);
+        renderSide();
+      }
+    }));
+  });
+  return box;
+}
+
+/* 単線結線図テンプレートの入力。Step2の値を初期値にする */
+function sldPanel() {
+  const nodes = [];
+  nodes.push(el("p", { class: "hint",
+    text: "「電気使用申込書の記入方法」p.9 の記載例（主開閉器契約）と同じ構成を、枠の左半分に一発で置きます。数値を直して「配置」を押してください。置いたあとは1つずつ動かせます。" }));
+
+  const num = (label, key, ph) => {
+    const inp = el("input", { type: "text", placeholder: ph || "" });
+    inp.setAttribute("inputmode", "decimal");
+    inp.value = sldTpl[key] || "";
+    inp.addEventListener("input", () => { sldTpl[key] = inp.value; });
+    return el("div", { class: "f" }, [el("label", { text: label }), inp]);
+  };
+  if (!sldTpl.sb)  sldTpl.sb  = state.values.sbAmp || String(state.values.ampNew || "").replace(/[^0-9]/g, "");
+  if (!sldTpl.elb) sldTpl.elb = state.values.elcbA || "";
+
+  nodes.push(num("引込線の種類（線の脇に書く）", "inlet", "DV2.6×2 / CV22-3c"));
+  nodes.push(num("電力SB 容量（A）", "sb", "40"));
+  nodes.push(num("漏電遮断器ELB 容量（A）", "elb", "50"));
+  nodes.push(num("分岐回路数", "n", "6"));
+  nodes.push(num("分岐ブレーカー 容量（A）", "branchA", "20"));
+  const ld = el("input", { type: "text", placeholder: "IH 5.8kW, エアコン 2kW, 照明" });
+  ld.value = sldTpl.loads || "";
+  ld.addEventListener("input", () => { sldTpl.loads = ld.value; });
+  nodes.push(el("div", { class: "f" }, [
+    el("label", { text: "負荷（カンマ区切り・左の回路から順・空欄可）" }), ld,
+    el("p", { class: "hint", text: "名称と容量の間にスペースを入れると丸の中で2行になります（例「IH 5.8kW」）。" })
+  ]));
+
+  const areaSel = el("select", {});
+  FORM.areas.filter(a => a.id.indexOf("sld") === 0).forEach(a => {
+    const o = el("option", { value: a.id, text: a.label + "（" + (a.page + 1) + "枚目）" });
+    if (a.id === (sldTpl.areaId || "sld") || (!sldTpl.areaId && a.id === "sld1")) o.selected = true;
+    areaSel.appendChild(o);
+  });
+  areaSel.addEventListener("change", () => { sldTpl.areaId = areaSel.value; });
+  nodes.push(el("div", { class: "f" }, [el("label", { text: "置く場所" }), areaSel]));
+
+  nodes.push(el("button", { class: "btn p w", text: "記載例どおりに配置",
+    onclick: () => placeSldTemplate(areaSel.value, sldTpl) }));
+  return nodes;
+}
+
+function stampPanel() {
+  const box = el("div", { class: "stampgrid" });
+  STAMPS.forEach(s => {
+    const b = el("button", { onclick: () => placeStamp(s) });
+    b.appendChild(el("b", { text: s.glyph }));
+    b.appendChild(el("span", { text: s.label }));
+    box.appendChild(b);
+  });
+  return box;
+}
+
+function mapPanel() {
+  const nodes = [];
+  nodes.push(el("p", { class: "hint",
+    text: "① 住所から下見を出す → ② 下見を指で動かして、目的の家を赤い枠の中に入れる → ③「この範囲で貼る」。枠の外側も少し取り込むので、貼ったあとでも寄せ直せます。" }));
+
+  const q = el("input", { type: "text", placeholder: "例）新潟県燕市白山町" });
+  // 打った住所はパネルを描き直しても消さない
+  q.value = mapPrev.query || state.values.useAddress || "";
+  q.addEventListener("input", () => { mapPrev.query = q.value; });
+  const fq = el("div", { class: "f" }, [el("label", { text: "① 住所（Step1の使用場所から自動で入ります）" }), q]);
+  nodes.push(fq);
+
+  const areaSel = el("select", {});
+  FORM.areas.forEach(a => {
+    const o = el("option", { value: a.id, text: a.label + "（" + (a.page + 1) + "枚目）" });
+    if (a.id === "vicinity") o.selected = true;
+    areaSel.appendChild(o);
+  });
+  // 縮尺は「枠に何メートル入るか」で選ぶ。ズーム番号より現場の感覚に近い。
+  const zoomSel = el("select", {});
+  function fillZoom() {
+    const area = FORM.areas.find(a => a.id === areaSel.value) || FORM.areas[0];
+    const wPx = P2C(area.rect[2]);
+    const src = TILE_SRC[state.mapStyle] || TILE_SRC.pale;
+    const cur = zoomSel.value ? parseInt(zoomSel.value, 10) : state.mapZoom;
+    zoomSel.innerHTML = "";
+    [16, 17, 18, 19, 20, 21].forEach(z => {
+      const m = Math.round(spanMeters(38, z, wPx));   // 東北・新潟あたりの緯度で概算
+      let t = "約" + (m >= 1000 ? (m / 1000).toFixed(1) + "km" : m + "m") + "幅";
+      if (z === 19) t += "（家がはっきり分かる）";
+      if (z === 20) t += "（敷地まわり）";
+      if (z === 21) t += "（かなりぼやけます）";
+      if (z > src.max) t += " ※拡大表示";
+      const o = el("option", { value: String(z), text: t });
+      if (z === cur) o.selected = true;
+      zoomSel.appendChild(o);
+    });
+  }
+  zoomSel.addEventListener("change", () => {
+    state.mapZoom = parseInt(zoomSel.value, 10);
+    if (mapPrev.lat != null) { mapPrev.zoom = state.mapZoom; busy(true, "縮尺を変えています…"); renderPreview().then(() => busy(false)); }
+  });
+  areaSel.addEventListener("change", () => {
+    fillZoom();
+    if (mapPrev.lat != null) { mapPrev.areaId = areaSel.value; busy(true, "作り直しています…"); renderPreview().then(() => busy(false)); }
+  });
+
+  const styleSel = el("select", {});
+  [["seamlessphoto", "航空写真（家が見分けられる・推奨）"],
+   ["pale", "淡色地図（線画・印刷向き）"],
+   ["std",  "標準地図"]].forEach(([v, t]) => {
+    const o = el("option", { value: v, text: t });
+    if (v === state.mapStyle) o.selected = true;
+    styleSel.appendChild(o);
+  });
+  styleSel.addEventListener("change", () => {
+    state.mapStyle = styleSel.value; fillZoom();
+    if (mapPrev.lat != null) { mapPrev.style = state.mapStyle; busy(true, "地図を差し替えています…"); renderPreview().then(() => busy(false)); }
+  });
+
+  nodes.push(el("div", { class: "f" }, [el("label", { text: "貼る場所" }), areaSel]));
+  nodes.push(el("div", { class: "f" }, [el("label", { text: "地図の種類" }), styleSel]));
+  nodes.push(el("div", { class: "f" }, [el("label", { text: "縮尺（枠に写る範囲）" }), zoomSel]));
+  fillZoom();
+
+  nodes.push(el("button", {
+    class: "btn p w", text: mapPrev.canvas ? "住所から出し直す" : "① 住所から下見を出す",
+    onclick: () => previewFromAddress(areaSel.value, q.value.trim(),
+                                      parseInt(zoomSel.value, 10) || state.mapZoom)
+  }));
+
+  // ---- 下見（プレビュー）----
+  if (mapPrev.canvas) {
+    const box = el("div", { class: "prevbox" });
+    const cv = el("canvas", { id: "mapPrevCv" });
+    box.appendChild(cv);
+    box.appendChild(el("div", { class: "prevtip", text: "ドラッグで動かす" }));
+    nodes.push(el("div", { class: "f" }, [
+      el("label", { text: "② 下見：赤い枠の中が用紙に出ます（外側は貼ったあとの調整用）" }), box
+    ]));
+
+    // 指／マウスで下見を動かす。画面上の移動量を緯度経度に直して取り直す。
+    let drag = null, moved = false;
+    const scaleOf = () => (mapPrev.canvas ? cv.clientWidth / mapPrev.canvas.width : 1);
+    cv.addEventListener("pointerdown", (e) => {
+      cv.setPointerCapture(e.pointerId);
+      drag = { x: e.clientX, y: e.clientY, lat: mapPrev.lat, lon: mapPrev.lon };
+      moved = false;
+    });
+    cv.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const s = scaleOf();
+      const dx = (e.clientX - drag.x) / s, dy = (e.clientY - drag.y) / s;
+      if (Math.abs(dx) + Math.abs(dy) < 2) return;
+      moved = true;
+      // ドラッグ中は取り直さず、描画をずらして見せる（軽くするため）
+      paintPreview(dx, dy);
+      drag.dx = dx; drag.dy = dy;
+    });
+    const endDrag = async () => {
+      if (!drag) return;
+      const d = drag; drag = null;
+      if (!moved || (!d.dx && !d.dy)) { paintPreview(); return; }
+      const u = unrotate(d.dx, d.dy);             // 回転している分を戻してから中心を動かす
+      const c = panCenter(d.lat, d.lon, mapPrev.zoom, u.dx, u.dy);
+      mapPrev.lat = c.lat; mapPrev.lon = c.lon;
+      await renderPreview();
+    };
+    cv.addEventListener("pointerup", endDrag);
+    cv.addEventListener("pointercancel", endDrag);
+    cv.addEventListener("pointerleave", endDrag);
+
+    // 微調整（指で細かく動かせないとき用）
+    const nudge = el("div", { class: "nudge" });
+    [["←", 60, 0], ["→", -60, 0], ["↑", 0, 60], ["↓", 0, -60]].forEach(([t, dx, dy]) => {
+      nudge.appendChild(el("button", { class: "btn", text: t, onclick: async () => {
+        const u = unrotate(dx, dy);
+        const c = panCenter(mapPrev.lat, mapPrev.lon, mapPrev.zoom, u.dx, u.dy);
+        mapPrev.lat = c.lat; mapPrev.lon = c.lon;
+        busy(true, "動かしています…"); await renderPreview(); busy(false);
+      }}));
+    });
+    nodes.push(nudge);
+
+    // 回転（道路や建物の向きを用紙に合わせたいとき）
+    const rotRow = el("div", { class: "nudge" });
+    const setRot = async (deg) => {
+      mapPrev.rot = ((deg % 360) + 360) % 360;
+      if (mapPrev.rot > 180) mapPrev.rot -= 360;
+      rotLbl.textContent = "回転 " + mapPrev.rot + "°";
+      rotSl.value = String(mapPrev.rot);
+      busy(true, "回しています…"); await renderPreview(); busy(false);
+    };
+    rotRow.appendChild(el("button", { class: "btn", text: "↺ 15°", onclick: () => setRot((mapPrev.rot || 0) - 15) }));
+    rotRow.appendChild(el("button", { class: "btn", text: "↺ 1°",  onclick: () => setRot((mapPrev.rot || 0) - 1) }));
+    rotRow.appendChild(el("button", { class: "btn", text: "1° ↻",  onclick: () => setRot((mapPrev.rot || 0) + 1) }));
+    rotRow.appendChild(el("button", { class: "btn", text: "15° ↻", onclick: () => setRot((mapPrev.rot || 0) + 15) }));
+    const rotLbl = el("label", { text: "回転 " + (mapPrev.rot || 0) + "°" });
+    const rotSl = el("input", { type: "range", min: "-180", max: "180", step: "1" });
+    rotSl.value = String(mapPrev.rot || 0); rotSl.style.width = "100%";
+    let rotT = null;
+    rotSl.addEventListener("input", () => {
+      rotLbl.textContent = "回転 " + rotSl.value + "°";
+      mapPrev.rot = parseInt(rotSl.value, 10);
+      paintPreview();                                 // つまみ中は今の画像を回すだけ
+      clearTimeout(rotT); rotT = setTimeout(() => renderPreview(), 350);   // 離したら取り直す
+    });
+    nodes.push(el("div", { class: "f" }, [rotLbl, rotSl, rotRow,
+      el("button", { class: "btn w", text: "北を上に戻す（0°）", onclick: () => setRot(0) })]));
+
+    nodes.push(el("button", {
+      class: "btn p w", text: "③ この範囲で貼る", onclick: () => commitMap()
+    }));
+    setTimeout(paintPreview, 0);
+  }
+
+  // 貼った地図は既定で固定。動かしたいときだけ解除する。
+  nodes.push(el("button", {
+    class: mapUnlocked ? "btn p w" : "btn w",
+    text: mapUnlocked ? "貼った地図を固定する（いま動かせます）" : "貼った地図を動かす（いまは固定中）",
+    onclick: () => { setMapLock(!mapUnlocked); renderSide(); }
+  }));
+
+  const op = el("input", { type: "range", min: "10", max: "100", step: "5" });
+  op.value = String(Math.round(state.mapOpacity * 100));
+  op.style.width = "100%";
+  op.addEventListener("input", () => {
+    state.mapOpacity = parseInt(op.value, 10) / 100;
+    let hit = false;
+    pageDraw.forEach(list => list.forEach(o => {
+      if (o.__mapArea || o.type === "image") { o.set("opacity", state.mapOpacity); hit = true; }
+    }));
+    if (hit) canvas.requestRenderAll();
+  });
+  nodes.push(el("div", { class: "f" }, [el("label", { text: "地図の濃さ" }), op]));
+
+  nodes.push(el("button", {
+    class: "btn w", text: "写真を背景にする",
+    onclick: () => {
+      const inp = el("input", { type: "file", accept: "image/*" });
+      inp.addEventListener("change", () => {
+        if (inp.files[0]) placePhoto(inp.files[0], areaSel.value);
+      });
+      inp.click();
+    }
+  }));
+  nodes.push(el("p", { class: "hint", text: "住所検索は町丁目までしか出ません（番地は出ない）。そのため下見で位置を合わせる作りにしています。下見は枠の外側も取り込んでいるので、目的の家が端に写っていても引き込めますし、貼ったあとでも同じぶんだけ動かせます。地理院タイルはズーム18が上限で、それより寄る設定は18の画像を引き伸ばしています（少し甘くなります）。出典表記は自動で入ります。" }));
+  return nodes;
+}
+
+function summaryTable() {
+  const t = el("table", { class: "cal" });
+  let n = 0;
+  FORM.fields.forEach(f => {
+    const v = state.values[f.id];
+    if (!v) return;
+    n++;
+    const tr = el("tr");
+    tr.appendChild(el("td", { text: f.label }));
+    tr.appendChild(el("td", { text: f.t === "check" ? "✓" : String(v) }));
+    t.appendChild(tr);
+  });
+  if (!n) return [el("p", { class: "hint", text: "まだ入力がありません。" })];
+  return [t];
+}
+
+/* ============================================================
+   11. 起動
+   ============================================================ */
+function start() {
+  initCanvas();
+  // 不具合調査用のハンドル（コンソールから中身を確認できるように）
+  window.__app = {
+    state: state, FORM: FORM,
+    get canvas() { return canvas; },
+    get fieldObj() { return fieldObj; },
+    get pageDraw() { return pageDraw; },
+    drawField: drawField, setValue: setValue,
+    buildMapCanvas: buildMapCanvas, TILE_SRC: TILE_SRC, spanMeters: spanMeters
+  };
+  loadLocal();
+  propagateLinks();
+  FORM.fields.forEach(f => { if (state.values[f.id]) drawField(f); });
+  showPage(0);
+  renderSteps(); renderSide(); renderTools();
+  $("#formName").textContent = FORM.name;
+  if (detectedMsg) setTimeout(() => toast(detectedMsg), 300);
+  // レイアウト確定後にフィットさせる（初回に極端に小さくなるのを防ぐ）
+  requestAnimationFrame(() => setTimeout(fitZoom, 60));
+  window.addEventListener("resize", () => setTimeout(fitZoom, 100));
+}
+
+/* 隠しファイル入力（プロジェクトJSON） */
+const projInput = el("input", { type: "file", accept: ".json,application/json", id: "projFile" });
+projInput.style.display = "none";
+projInput.addEventListener("change", () => { if (projInput.files[0]) loadProject(projInput.files[0]); });
+document.body.appendChild(projInput);
+
+/* ゲート（PDF選択） */
+(async function boot() {
+  const gate = $("#gate");
+  if (location.protocol === "file:") {
+    $("#gateMsg").textContent =
+      "※ ファイルを直接開いています。この開き方だと、ブラウザによっては用紙の記憶（次回の読み込み省略）が使えず、" +
+      "読み込みも遅くなります。iPadで使う場合や動きが怪しい場合は、サーバー上に置いて開いてください。";
+  }
+  const cached = await DB.get("pdf");
+  if (cached) {
+    $("#btnCached").style.display = "";
+    $("#gateMsg").textContent = "前回読み込んだPDFがこの端末に残っています。";
+  }
+  $("#btnPick").addEventListener("click", () => $("#pdfFile").click());
+  $("#pdfFile").addEventListener("change", async () => {
+    const f = $("#pdfFile").files[0];
+    if (!f) return;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    pdfBytesCache = buf;
+    try {
+      await renderPdf(buf);
+    } catch (e) {
+      $("#gateMsg").textContent = "このPDFは読み込めませんでした：" + e.message;
+      return;
+    }
+    await DB.put("pdf", buf);
+    gate.style.display = "none";
+    start();
+  });
+  $("#btnCached").addEventListener("click", async () => {
+    const b = await DB.get("pdf");
+    if (!b) { toast("保存されたPDFがありません"); return; }
+    pdfBytesCache = b;
+    await renderPdf(b);
+    gate.style.display = "none";
+    start();
+  });
+  $("#btnReload").addEventListener("click", () => {
+    gate.style.display = "flex";
+  });
+})();
+</script>
+</body>
+</html>

@@ -710,6 +710,7 @@ function showPage(i) {
   // このページの図面オブジェクト（地図・写真は最背面へ）
   pageDraw[i].forEach(o => canvas.add(o));
   pageDraw[i].forEach(o => { if (o.__mapArea) canvas.sendToBack(o); });
+  keepTextOnTop();
   renderTools();
   return new Promise((res) => {
     fabric.Image.fromURL(pageBg[i], (img) => {
@@ -989,11 +990,20 @@ function applyRules(changed) {
 /* ============================================================
    7. 図面ツール（直線 / スタンプ / 地図）
    ============================================================ */
+const isTextObj = (o) => o && (o.type === "i-text" || o.type === "text" || o.type === "textbox");
+
+/* 文字は常に一番手前に置く。線やスタンプの下に潜ると読めないし、タップで掴めなくなる。 */
+function keepTextOnTop() {
+  canvas.getObjects().forEach(o => { if (o.__draw && isTextObj(o)) canvas.bringToFront(o); });
+}
+
 function addDrawObject(o) {
   o.set({ __draw: true });
+  if (isTextObj(o)) o.set({ padding: 8 });      // 小さい文字でも指で掴めるように当たり判定を広げる
   canvas.add(o);
   pageDraw[state.page].push(o);
   undoStack.push({ page: state.page, obj: o });
+  keepTextOnTop();
   canvas.setActiveObject(o);
   canvas.requestRenderAll();
 }
@@ -1313,8 +1323,9 @@ function placeSldTemplate(areaId, o) {
     }
   }
 
-  objs.forEach(ob => { ob.set({ __draw: true, selectable: state.tool === "select" }); canvas.add(ob); pageDraw[area.page].push(ob); });
+  objs.forEach(ob => { ob.set({ __draw: true, selectable: state.tool === "select" }); if (isTextObj(ob)) ob.set({ padding: 6 }); canvas.add(ob); pageDraw[area.page].push(ob); });
   undoStack.push({ page: area.page, obj: objs });
+  keepTextOnTop();
   if (state.page !== area.page) showPage(area.page).then(() => zoomToArea(area.id));
   else zoomToArea(area.id);
   canvas.requestRenderAll();

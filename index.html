@@ -1268,6 +1268,7 @@ const sldTpl = { inlet: "DV2.6×2", sb: "", elb: "", n: 6, branchA: "20", loads:
 function placeSldTemplate(areaId, o) {
   const area = FORM.areas.find(a => a.id === areaId);
   if (!area) { toast("単線結線図の枠がありません"); return; }
+  autoLockMap();
   const R = area.rect;
   const px = v => P2C(v);
   const font = '"Hiragino Sans","Noto Sans JP",sans-serif';
@@ -1335,6 +1336,7 @@ function placeSldTemplate(areaId, o) {
 function placeStamp(def) {
   const o = def.make();
   if (!o) return;
+  autoLockMap();
   // 現在のページの主要エリア中央、なければ画面中央
   const area = FORM.areas.find(a => a.page === state.page);
   let cx = canvas.getWidth() / 2, cy = canvas.getHeight() / 2;
@@ -1355,7 +1357,8 @@ let mapUnlocked = false;   // 地図を動かせる状態か
 
 /* 地図・写真の背景だけをまとめてロック／解除する。
    固定しておかないと、スタンプを置こうとして地図を掴んでしまう。 */
-function setMapLock(unlock) {
+function setMapLock(unlock, quiet) {
+  const was = mapUnlocked;
   mapUnlocked = !!unlock;
   pageDraw.forEach(list => list.forEach(o => {
     if (!o.__mapArea || o.__mapNote) return;   // 出典表記は常に固定
@@ -1364,8 +1367,12 @@ function setMapLock(unlock) {
   }));
   if (!mapUnlocked) canvas.discardActiveObject();
   canvas.requestRenderAll();
-  toast(mapUnlocked ? "地図を動かせます（ドラッグ／四隅で拡大縮小）" : "地図を固定しました");
+  if (!quiet) toast(mapUnlocked ? "地図を動かせます（ドラッグ／四隅で拡大縮小・回転）" : "地図を固定しました");
+  if (was !== mapUnlocked) renderTools();
 }
+/* 描く操作に入ったら地図は自動で固定する（掴み間違い防止） */
+function autoLockMap() { if (mapUnlocked) setMapLock(false, true); }
+function hasPlacedMap() { return pageDraw.some(list => list.some(o => o.__mapArea && !o.__mapNote)); }
 function lon2tile(lon, z) { return (lon + 180) / 360 * Math.pow(2, z); }
 function lat2tile(lat, z) {
   const r = lat * Math.PI / 180;
@@ -1684,13 +1691,15 @@ async function commitMap() {
   pageDraw[area.page].push(note);
 
   if (state.page !== area.page) await showPage(area.page);
-  setMapLock(true);
-  canvas.setActiveObject(img);
+  // 地図は貼ったら固定。動かしたいときだけツールバーの「地図」で解除する。
+  // 動かせる状態だと、スタンプや線を掴もうとして地図を掴んでしまう。
+  setMapLock(false, true);
+  canvas.discardActiveObject();
   canvas.requestRenderAll();
   // そのまま描き込めるよう、枠を画面いっぱいに拡大しておく
   setTimeout(() => zoomToArea(area.id), 60);
   renderSide();                                    // 「貼った地図を線画に／写真に」を出す
-  toast(area.label + "に貼って拡大しました。このまま描き込めます");
+  toast(area.label + "に貼りました。地図を動かすときはツールバーの「地図：固定」を押します");
 }
 
 /* 住所から下見を出す */
@@ -1970,6 +1979,7 @@ function renderTools() {
       class: state.tool === k ? "on" : "", text: t,
       onclick: () => {
         state.tool = k;
+        if (k !== "select" && k !== "pan") autoLockMap();   // 描く・置く操作に入ったら地図は固定
         canvas.isDrawingMode = (k === "pen" && !state.pencilOnly);
         canvas.selection = (k === "select");
         // 移動モードと選択モードでは、指でのスクロールをFabricに邪魔させない
@@ -1991,6 +2001,16 @@ function renderTools() {
   g2.appendChild(el("button", { text: "取消", onclick: undo }));
   g2.appendChild(el("button", { text: "削除", onclick: delSelected }));
   g2.appendChild(el("button", { text: "文字を直す", onclick: editSelectedText }));
+  if (hasPlacedMap()) {
+    g2.appendChild(el("button", {
+      class: mapUnlocked ? "on" : "",
+      text: mapUnlocked ? "地図：動かせる" : "地図：固定",
+      onclick: () => {
+        if (!mapUnlocked) { state.tool = "select"; canvas.selection = true; }   // 動かすには選択モード
+        setMapLock(!mapUnlocked);
+      }
+    }));
+  }
   const sz = el("select", {});
   [["小", 8 * K], ["中", 11 * K], ["大", 15 * K]].forEach(([t, v]) => {
     const o = el("option", { value: String(v), text: "文字" + t });
@@ -2511,8 +2531,8 @@ function mapPanel() {
   // 貼った地図は既定で固定。動かしたいときだけ解除する。
   nodes.push(el("button", {
     class: mapUnlocked ? "btn p w" : "btn w",
-    text: mapUnlocked ? "貼った地図を固定する（いま動かせます）" : "貼った地図を動かす（いまは固定中）",
-    onclick: () => { setMapLock(!mapUnlocked); renderSide(); }
+    text: mapUnlocked ? "地図を固定する（いま動かせます）" : "地図を動かす（いまは固定中）",
+    onclick: () => { if (!mapUnlocked) { state.tool = "select"; canvas.selection = true; } setMapLock(!mapUnlocked); renderSide(); }
   }));
   // 貼ったあとでも写真⇄線画を切り替えられる
   const placed = pageDraw.some(list => list.some(o => o.__mapArea && !o.__mapNote));

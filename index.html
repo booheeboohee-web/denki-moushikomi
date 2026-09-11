@@ -106,6 +106,7 @@ header .sp{flex:0 1 0;min-width:0}
 #tools .grp:last-child{border-right:none}
 #tools label{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:5px}
 #tools .grplabel{font-size:11px;color:var(--sub);align-self:center;padding-right:2px}
+#tools select{height:var(--tap);border:1px solid var(--line);border-radius:10px;background:#fff;padding:0 8px;font-size:13px}
 /* 狭い画面ではツールバーを折り返さず横スクロールにする。
    折り返すと6段になって画面の3割を占めてしまう。 */
 @media (max-width:760px){
@@ -689,6 +690,7 @@ function initCanvas() {
   });
 
   setupLineTool();
+  setupTextTool();
   setupCalibrateTool();
   setupPan();
   setupPinch();
@@ -996,36 +998,128 @@ function addDrawObject(o) {
   canvas.requestRenderAll();
 }
 
+const LINE_TOOLS = ["line", "zline", "dashline"];
+
+/* 引込線の記号：線の途中に「Z」の折れを入れる（記入方法p.4/p.10の使用区域図の記載例と同じ）。
+   折れは線の 40%〜60% の区間に、線に直角な向きで入れる。 */
+function zLinePoints(x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1;
+  const ux = dx / L, uy = dy / L;                 // 進行方向
+  const px = -uy, py = ux;                        // 直角方向
+  const d = Math.min(P2C(4.5), L * 0.16);         // 折れの振れ幅（記載例に合わせて鋭めに）
+  const a = 0.45, b2 = 0.55;
+  const ax = x1 + dx * a,  ay = y1 + dy * a;
+  const bx = x1 + dx * b2, by = y1 + dy * b2;
+  return [
+    { x: x1, y: y1 },
+    { x: ax + px * d, y: ay + py * d },
+    { x: bx - px * d, y: by - py * d },
+    { x: x2, y: y2 }
+  ];
+}
+function makeLineObj(kind, x1, y1, x2, y2) {
+  const common = { stroke: "#111", strokeWidth: 4, strokeLineCap: "round", strokeLineJoin: "round", fill: "" };
+  if (kind === "zline") {
+    return new fabric.Polyline(zLinePoints(x1, y1, x2, y2), Object.assign({ objectCaching: false }, common));
+  }
+  if (kind === "dashline") {
+    // 一点鎖線（配電線・道路沿いの電力線）
+    return new fabric.Line([x1, y1, x2, y2], Object.assign({ strokeDashArray: [18, 7, 4, 7] }, common));
+  }
+  return new fabric.Line([x1, y1, x2, y2], common);
+}
+
+/* 文字ツール：タップした場所に文字を置く。ダブルタップ編集はiPadで当てにならないので、
+   入力は prompt で行う。置いた文字は選択して「文字を直す」で書き換えられる。 */
+function setupTextTool() {
+  let down = null;
+  canvas.on("mouse:down", (e) => {
+    if (state.tool !== "text") return;
+    down = canvas.getPointer(e.e);
+  });
+  canvas.on("mouse:up", (e) => {
+    if (state.tool !== "text" || !down) return;
+    const p = canvas.getPointer(e.e);
+    const moved = Math.hypot(p.x - down.x, p.y - down.y) > 8;
+    down = null;
+    if (moved) return;                          // ドラッグは無視（誤タップ防止）
+    const t = prompt("図面に入れる文字（例 国道55線 / No.7東1 / 6m）", "");
+    if (!t || !t.trim()) return;
+    const o = new fabric.IText(t.trim(), {
+      left: p.x, top: p.y, originX: "left", originY: "center",
+      fontSize: state.textSize || 11 * K, fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
+      fill: "#111", editable: false
+    });
+    addDrawObject(o);
+  });
+}
+
+/* 選択中の文字を書き換える */
+function editSelectedText() {
+  const o = canvas.getActiveObject();
+  if (!o) { toast("直したい文字を先にタップして選んでください"); return; }
+  const target = (o.type === "i-text" || o.type === "text" || o.type === "textbox") ? o
+               : (o.type === "group" ? o.getObjects().find(x => x.type === "i-text" || x.type === "text") : null);
+  if (!target) { toast("文字ではないものが選ばれています"); return; }
+  const t = prompt("文字を直す", target.text);
+  if (t === null) return;
+  target.set("text", t);
+  if (o.type === "group") { o.addWithUpdate(); }
+  o.setCoords();
+  canvas.requestRenderAll();
+}
+
 function setupLineTool() {
   let start = null, preview = null;
   canvas.on("mouse:down", (e) => {
-    if (state.tool !== "line") return;
+    if (LINE_TOOLS.indexOf(state.tool) < 0) return;
     const p = canvas.getPointer(e.e);
     start = p;
-    preview = new fabric.Line([p.x, p.y, p.x, p.y], {
-      stroke: "#111", strokeWidth: 4, selectable: false, evented: false
-    });
+    preview = makeLineObj(state.tool, p.x, p.y, p.x, p.y);
+    preview.set({ selectable: false, evented: false });
     canvas.add(preview);
   });
   canvas.on("mouse:move", (e) => {
-    if (state.tool !== "line" || !start || !preview) return;
+    if (LINE_TOOLS.indexOf(state.tool) < 0 || !start || !preview) return;
     const p = canvas.getPointer(e.e);
     let x = p.x, y = p.y;
     if (e.e.shiftKey) {                       // Shiftで水平/垂直
       if (Math.abs(x - start.x) > Math.abs(y - start.y)) y = start.y; else x = start.x;
     }
-    preview.set({ x2: x, y2: y });
+    // プレビューは作り直す（Polylineは点を差し替える方が確実）
+    canvas.remove(preview);
+    preview = makeLineObj(state.tool, start.x, start.y, x, y);
+    preview.set({ selectable: false, evented: false });
+    canvas.add(preview);
     canvas.requestRenderAll();
   });
   canvas.on("mouse:up", (e) => {
-    if (state.tool !== "line" || !start || !preview) return;
-    const x1 = preview.x1, y1 = preview.y1, x2 = preview.x2, y2 = preview.y2;
+    if (LINE_TOOLS.indexOf(state.tool) < 0 || !start || !preview) return;
+    const p = canvas.getPointer(e.e);
+    let x = p.x, y = p.y;
+    if (e.e.shiftKey) { if (Math.abs(x - start.x) > Math.abs(y - start.y)) y = start.y; else x = start.x; }
+    const x1 = start.x, y1 = start.y;
+    const kind = state.tool;
     canvas.remove(preview);
     start = null; preview = null;
-    if (Math.hypot(x2 - x1, y2 - y1) < 6) { canvas.requestRenderAll(); return; }
-    addDrawObject(new fabric.Line([x1, y1, x2, y2], {
-      stroke: "#111", strokeWidth: 4, strokeLineCap: "round"
-    }));
+    if (Math.hypot(x - x1, y - y1) < 6) { canvas.requestRenderAll(); return; }
+    addDrawObject(makeLineObj(kind, x1, y1, x, y));
+
+    // 引込線には仕様と長さを添える（例「既設DV3C3.2×12m」「6m」）。空なら付けない
+    if (kind === "zline") {
+      const t = prompt("引込線の仕様・長さ（空欄なら付けない）", "DV2.6×2 " + "m");
+      if (t && t.trim()) {
+        const mx = (x1 + x) / 2, my = (y1 + y) / 2;
+        const dx = x - x1, dy = y - y1, L = Math.hypot(dx, dy) || 1;
+        const px = -dy / L, py = dx / L;           // 線の脇に置く
+        const lab = new fabric.IText(t.trim(), {
+          left: mx + px * P2C(11), top: my + py * P2C(11),
+          fontSize: 8 * K, fontFamily: '"Hiragino Sans",sans-serif', fill: "#111",
+          originX: "center", originY: "center"
+        });
+        addDrawObject(lab);
+      }
+    }
   });
 }
 
@@ -1053,7 +1147,8 @@ const STAMPS = [
       const t = prompt("配線の種類（例 CV22-3c / DV2.6×2 / CVT60-3c）", "CV22-3c");
       return t === null ? null : stampNote(t); } },
   { id:"earth",    label:"D種接地",  glyph:"⏚", make: () => stampEarth() },
-  { id:"tatemono", label:"建物外枠", glyph:"⌂", make: () => stampBuilding() },
+  { id:"house",    label:"建物（屋根）", glyph:"⌂", make: () => stampHouse() },
+  { id:"tatemono", label:"建物外枠", glyph:"▭", make: () => stampBuilding() },
   { id:"note",     label:"注記",     glyph:"文", make: () => stampNote("注記") }
 ];
 const K = 1.6; // スタンプ基準倍率（描画px）
@@ -1101,6 +1196,19 @@ function stampEarth() {
     new fabric.Line([0, -4*u, 0, 0], { stroke:"#111", strokeWidth:2.4, originX:"center", originY:"center" }),
     mk(4*u, 0), mk(2.6*u, 1.6*u), mk(1.2*u, 3.2*u)
   ], { originX:"center", originY:"center" });
+}
+/* 記載例の建物記号：四角に寄棟の屋根線（四隅から棟へ） */
+function stampHouse() {
+  const w = 96 * K, h = 64 * K, rw = w * 0.34;   // 棟の長さ
+  const L = (x1, y1, x2, y2) => new fabric.Line([x1, y1, x2, y2],
+    { stroke: "#111", strokeWidth: 2.4, originX: "center", originY: "center" });
+  return new fabric.Group([
+    new fabric.Rect({ width: w, height: h, fill: "rgba(255,255,255,0)", stroke: "#111", strokeWidth: 2.4,
+                      left: -w/2, top: -h/2, originX: "left", originY: "top" }),
+    L(-rw/2, 0, rw/2, 0),                       // 棟
+    L(-w/2, -h/2, -rw/2, 0), L(-w/2, h/2, -rw/2, 0),
+    L( w/2, -h/2,  rw/2, 0), L( w/2, h/2,  rw/2, 0)
+  ], { originX: "center", originY: "center" });
 }
 function stampBuilding() {
   const w = 110 * K, h = 78 * K;
@@ -1757,7 +1865,7 @@ function renderSteps() {
 function renderTools() {
   const box = $("#tools"); box.innerHTML = "";
   const g1 = el("div", { class: "grp" });
-  [["pan", "移動"], ["select", "選択"], ["pen", "ペン"], ["line", "配線"]].forEach(([k, t]) => {
+  [["pan", "移動"], ["select", "選択"], ["text", "文字"], ["pen", "ペン"], ["line", "直線"], ["zline", "引込線(Z)"], ["dashline", "電力線(‑·‑)"]].forEach(([k, t]) => {
     g1.appendChild(el("button", {
       class: state.tool === k ? "on" : "", text: t,
       onclick: () => {
@@ -1766,7 +1874,7 @@ function renderTools() {
         canvas.selection = (k === "select");
         // 移動モードと選択モードでは、指でのスクロールをFabricに邪魔させない
         canvas.allowTouchScrolling = (k === "pan" || k === "select");
-        canvas.upperCanvasEl.style.cursor = (k === "pan") ? "grab" : "default";
+        canvas.upperCanvasEl.style.cursor = (k === "pan") ? "grab" : (k === "text" ? "text" : "default");
         canvas.upperCanvasEl.style.touchAction = (k === "pan") ? "none" : "";
         // 地図・写真は固定状態を尊重する（掴んでずらす事故を防ぐ）
         canvas.forEachObject(o => {
@@ -1782,6 +1890,19 @@ function renderTools() {
   const g2 = el("div", { class: "grp" });
   g2.appendChild(el("button", { text: "取消", onclick: undo }));
   g2.appendChild(el("button", { text: "削除", onclick: delSelected }));
+  g2.appendChild(el("button", { text: "文字を直す", onclick: editSelectedText }));
+  const sz = el("select", {});
+  [["小", 8 * K], ["中", 11 * K], ["大", 15 * K]].forEach(([t, v]) => {
+    const o = el("option", { value: String(v), text: "文字" + t });
+    if ((state.textSize || 11 * K) === v) o.selected = true;
+    sz.appendChild(o);
+  });
+  sz.addEventListener("change", () => {
+    state.textSize = parseFloat(sz.value);
+    const o = canvas.getActiveObject();           // 選択中の文字にも即反映
+    if (o && (o.type === "i-text" || o.type === "text")) { o.set("fontSize", state.textSize); o.setCoords(); canvas.requestRenderAll(); }
+  });
+  g2.appendChild(sz);
   box.appendChild(g2);
 
   const g3 = el("div", { class: "grp" });

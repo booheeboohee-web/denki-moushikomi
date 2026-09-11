@@ -1236,6 +1236,9 @@ const STAMPS = [
   { id:"elb",      label:"ELB（容量）", glyph:"E",  make: () => {
       const a = prompt("漏電遮断器ELBの容量（A）", state.values.elcbA || "50");
       return a === null ? null : stampBox("ELB " + a + "A", 66, 30); } },
+  { id:"be",       label:"漏電ブレーカー BE", glyph:"BE", make: () => {
+      const a = prompt("漏電ブレーカーの容量（A）", state.values.elcbA || "50");
+      return a === null ? null : stampBranch(a, "BE"); } },
   { id:"br",       label:"分岐B",     glyph:"B",  make: () => {
       const a = prompt("分岐ブレーカーの容量（A）", "20");
       return a === null ? null : stampBranch(a); } },
@@ -1330,12 +1333,13 @@ function stampBuilding() {
   });
 }
 /* 分岐ブレーカー：小さな箱に「B」、下に容量 */
-function stampBranch(amp) {
-  const w = 18 * K, h = 18 * K;
+function stampBranch(amp, label) {
+  label = label || "B";
+  const w = (label.length > 1 ? 26 : 18) * K, h = 18 * K;
   return new fabric.Group([
     new fabric.Rect({ width: w, height: h, fill:"#fff", stroke:"#111", strokeWidth:2.4,
                       left:-w/2, top:-h/2, originX:"left", originY:"top" }),
-    new fabric.Text("B", { fontSize: h*0.62, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
+    new fabric.Text(label, { fontSize: h*0.62, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
                       originX:"center", originY:"center", left:0, top:0 }),
     new fabric.Text(amp + "A", { fontSize: 8*K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
                       originX:"center", originY:"top", left:0, top:h/2 + 2 })

@@ -164,6 +164,7 @@ header .sp{flex:0 1 0;min-width:0}
 .btn.w{width:100%}
 .hint{font-size:11.5px;color:var(--sub);line-height:1.6;margin:6px 0 0}
 .hint.warn{color:var(--warn)}
+label.chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);font-weight:500;margin:8px 0 4px}
 .req{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:5px;background:#fdecea;color:var(--warn);font-size:10.5px;font-weight:700;vertical-align:middle}
 .rowbtn{display:flex;gap:8px;flex-wrap:wrap}
 .rowbtn .btn{flex:1;min-width:110px}
@@ -1415,18 +1416,14 @@ function spanMeters(lat, z, wPx) {
   return wPx * 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z);
 }
 
-async function buildMapCanvas(lat, lon, z, wPx, hPx, style) {
+/* 指定の中心・ズーム・ピクセル数でタイルを敷き詰めた「元解像度」のキャンバスを作る */
+async function buildBase(lat, lon, Z, bw, bh, style) {
   const TS = 256;
   const src = TILE_SRC[style] || TILE_SRC.pale;
-  const Z = Math.min(z, src.max);
-  const over = Math.pow(2, z - Z);          // 1 / 2 / 4 / 8 倍に引き伸ばす
-  const bw = Math.ceil(wPx / over), bh = Math.ceil(hPx / over);
-
   const cx = lon2tile(lon, Z) * TS, cy = lat2tile(lat, Z) * TS;
   const x0 = cx - bw / 2, y0 = cy - bh / 2;
   const tx0 = Math.floor(x0 / TS), ty0 = Math.floor(y0 / TS);
   const tx1 = Math.floor((x0 + bw) / TS), ty1 = Math.floor((y0 + bh) / TS);
-
   const base = document.createElement("canvas");
   base.width = bw; base.height = bh;
   const bctx = base.getContext("2d");
@@ -1440,6 +1437,15 @@ async function buildMapCanvas(lat, lon, z, wPx, hPx, style) {
     }
   }
   await Promise.all(jobs);
+  return base;
+}
+
+async function buildMapCanvas(lat, lon, z, wPx, hPx, style) {
+  const src = TILE_SRC[style] || TILE_SRC.pale;
+  const Z = Math.min(z, src.max);
+  const over = Math.pow(2, z - Z);          // 1 / 2 / 4 / 8 倍に引き伸ばす
+  const bw = Math.ceil(wPx / over), bh = Math.ceil(hPx / over);
+  const base = await buildBase(lat, lon, Z, bw, bh, style);
 
   const c = document.createElement("canvas");
   c.width = Math.round(wPx); c.height = Math.round(hPx);
@@ -1452,7 +1458,109 @@ async function buildMapCanvas(lat, lon, z, wPx, hPx, style) {
   // クリップで消えてしまうため、貼るときに枠の内側へ別途置く。
   c.__attr = src.attr;
   c.__mPerPx = spanMeters(lat, z, 1);
+  c.__geo = { lat: lat, lon: lon, z: z, w: c.width, h: c.height, style: style };
   return c;
+}
+
+/* ------------------------------------------------------------
+   建物・道路の線だけを描く（標準地図の色分けを使う）
+   標準地図タイルは 建物＝(255,230,190)の塗り＋オレンジの縁、道路と文字＝グレー(100)。
+   これを拡大前の元解像度で判別し、
+     建物 → 外周をマーチングスクエアで輪郭線（ベクタ）にして拡大後の解像度で描く
+     道路 → 細い線のまま描く
+     文字 → グレー画素の密度が高い塊として除く（任意で残せる）
+   拡大してから輪郭を取るのではないので、線がぼやけない。
+   ------------------------------------------------------------ */
+const outlineCache = { key: "", canvas: null };
+
+async function buildOutlineCanvas(lat, lon, z, wPx, hPx, keepText) {
+  const key = [lat, lon, z, wPx, hPx, keepText ? 1 : 0].join(",");
+  if (outlineCache.key === key) return outlineCache.canvas;
+
+  const Z = Math.min(z, 18);
+  const over = Math.pow(2, z - Z);
+  const bw = Math.ceil(wPx / over), bh = Math.ceil(hPx / over);
+  const base = await buildBase(lat, lon, Z, bw, bh, "std");
+  const d = base.getContext("2d").getImageData(0, 0, bw, bh).data;
+
+  // 色で分類（標準地図の配色）：建物＝薄橙の塗り＋橙の縁 / 道路＝グレー(100) / 文字＝黒(0) / 水＝青
+  const bld = new Uint8Array(bw * bh), gray = new Uint8Array(bw * bh), dark = new Uint8Array(bw * bh), water = new Uint8Array(bw * bh);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    if (r > 235 && g >= 120 && g <= 245 && b >= 55 && b <= 210 && (r - b) > 35) { bld[j] = 1; continue; }   // 建物（塗り・縁・AA）
+    if (b > r + 40 && b > 140) { water[j] = 1; continue; }                                                // 川・水路
+    if (Math.abs(r - g) < 14 && Math.abs(g - b) < 14 && r <= 205) {
+      if (r < 85) dark[j] = 1; else gray[j] = 1;                                                          // 黒＝文字 / グレー＝道路
+    }
+  }
+
+  // 文字を除く：黒画素の周囲 3px にあるグレー画素（文字の縁のAA）も一緒に落とす
+  const road = new Uint8Array(bw * bh);
+  if (keepText) { for (let j = 0; j < bw * bh; j++) road[j] = gray[j] | dark[j]; }
+  else {
+    const W1 = bw + 1;
+    const ii = new Int32Array((bw + 1) * (bh + 1));
+    for (let y = 1; y <= bh; y++) { let row = 0;
+      for (let x = 1; x <= bw; x++) { row += dark[(y - 1) * bw + (x - 1)]; ii[y * W1 + x] = ii[(y - 1) * W1 + x] + row; } }
+    const R2 = 3;
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+      const j = y * bw + x; if (!gray[j]) continue;
+      const x0 = Math.max(0, x - R2), y0 = Math.max(0, y - R2), x1 = Math.min(bw, x + R2 + 1), y1 = Math.min(bh, y + R2 + 1);
+      const near = ii[y1 * W1 + x1] - ii[y0 * W1 + x1] - ii[y1 * W1 + x0] + ii[y0 * W1 + x0];
+      if (near === 0) road[j] = 1;
+    }
+  }
+
+  const out = document.createElement("canvas");
+  out.width = Math.round(wPx); out.height = Math.round(hPx);
+  const g = out.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, out.width, out.height);
+
+  // 水路・川：薄いグレーの線
+  g.fillStyle = "#b0b0b0";
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) if (water[y * bw + x]) g.fillRect(x * over, y * over, over, over);
+
+  // 道路：元の1画素を拡大率ぶんの四角で描く（小さく描くと隙間ができて点線に見える）。
+  // 元の道路線は1〜2画素なので、これで拡大後も細い線になる。色は建物より薄いグレー。
+  g.fillStyle = "#6a6a6a";
+  for (let y = 0; y < bh; y++) {
+    let x = 0;
+    while (x < bw) {                                 // 横に連続する画素はまとめて1本で描く
+      if (!road[y * bw + x]) { x++; continue; }
+      let x2 = x; while (x2 + 1 < bw && road[y * bw + x2 + 1]) x2++;
+      g.fillRect(x * over, y * over, (x2 - x + 1) * over, over);
+      x = x2 + 1;
+    }
+  }
+
+  // 建物の外周：マーチングスクエアで線分にして、拡大後の解像度で描く
+  g.strokeStyle = "#222"; g.lineWidth = Math.max(1.2, over * 0.55); g.lineCap = "round";
+  g.beginPath();
+  const at = (x, y) => (x < 0 || y < 0 || x >= bw || y >= bh) ? 0 : bld[y * bw + x];
+  const seg = (x1, y1, x2, y2) => { g.moveTo(x1 * over, y1 * over); g.lineTo(x2 * over, y2 * over); };
+  for (let y = -1; y < bh; y++) for (let x = -1; x < bw; x++) {
+    const c = at(x, y) | (at(x + 1, y) << 1) | (at(x + 1, y + 1) << 2) | (at(x, y + 1) << 3);
+    if (c === 0 || c === 15) continue;
+    const cx = x + 1, cy = y + 1;                                    // 画素中心の格子
+    const T = [cx, cy - 0.5], Rr = [cx + 0.5, cy], B = [cx, cy + 0.5], L = [cx - 0.5, cy];
+    switch (c) {
+      case 1: case 14: seg(L[0], L[1], T[0], T[1]); break;
+      case 2: case 13: seg(T[0], T[1], Rr[0], Rr[1]); break;
+      case 3: case 12: seg(L[0], L[1], Rr[0], Rr[1]); break;
+      case 4: case 11: seg(Rr[0], Rr[1], B[0], B[1]); break;
+      case 5:          seg(L[0], L[1], T[0], T[1]); seg(Rr[0], Rr[1], B[0], B[1]); break;
+      case 6: case 9:  seg(T[0], T[1], B[0], B[1]); break;
+      case 7: case 8:  seg(L[0], L[1], B[0], B[1]); break;
+      case 10:         seg(T[0], T[1], Rr[0], Rr[1]); seg(L[0], L[1], B[0], B[1]); break;
+    }
+  }
+  g.stroke();
+
+  out.__attr = "地理院タイル（標準地図）を線画化";
+  out.__mPerPx = spanMeters(lat, z, 1);
+  out.__geo = { lat: lat, lon: lon, z: z, w: out.width, h: out.height, style: "std" };
+  outlineCache.key = key; outlineCache.canvas = out;
+  return out;
 }
 
 /* 枠に出る範囲の実距離から出典表記の文字列を作る */
@@ -1467,7 +1575,7 @@ const OVERSCAN = 1.45;
 /* 貼る前の下見。ここで位置を合わせてから確定する。 */
 const mapPrev = {
   areaId: null, lat: null, lon: null, zoom: 19, style: null,
-  canvas: null, title: "", query: "", rot: 0, lineArt: false, laTh: 60, busy: false, seq: 0
+  canvas: null, title: "", query: "", rot: 0, mode: "photo", outline: null, keepText: false, laTh: 60, busy: false, seq: 0
 };
 
 function tile2lon(tx, z) { return tx / Math.pow(2, z) * 360 - 180; }
@@ -1501,6 +1609,8 @@ async function renderPreview() {
   const c = await buildMapCanvas(mapPrev.lat, mapPrev.lon, mapPrev.zoom, W, H, mapPrev.style);
   if (my !== mapPrev.seq) return;          // 連打されたら古い結果は捨てる
   mapPrev.canvas = c;
+  mapPrev.outline = null;
+  if (mapPrev.mode === "outline") { await ensureOutline(); if (my !== mapPrev.seq) return; }
   paintPreview();
 }
 
@@ -1619,35 +1729,49 @@ function lineArtCanvas(src, threshold, thick) {
   return out;
 }
 
-/* 下見に使う画像（線画ONなら変換後） */
-const isPhotoStyle = (st) => (st === "seamlessphoto" || st === "ort");
-function laDefaultTh(style) { return isPhotoStyle(style) ? 60 : 30; }
-
+/* 下見に使う画像（見た目モードに応じて）
+   mode: "photo"=写真・地図のまま / "outline"=建物・道路の線だけ / "edge"=輪郭抽出 */
 function prevCanvasForUse() {
   if (!mapPrev.canvas) return null;
-  if (!mapPrev.lineArt) return mapPrev.canvas;
-  return lineArtCanvas(mapPrev.canvas, mapPrev.laTh || laDefaultTh(mapPrev.style), isPhotoStyle(mapPrev.style));
+  if (mapPrev.mode === "outline" && mapPrev.outline) return mapPrev.outline;
+  if (mapPrev.mode === "edge") {
+    return lineArtCanvas(mapPrev.canvas, mapPrev.laTh || laDefaultTh(mapPrev.style), isPhotoStyle(mapPrev.style));
+  }
+  return mapPrev.canvas;
+}
+/* 「建物・道路の線だけ」用の画像を、下見と同じ位置・ズーム・大きさで作る */
+async function ensureOutline() {
+  if (!mapPrev.canvas) return;
+  const gd = mapPrev.canvas.__geo;
+  mapPrev.outline = await buildOutlineCanvas(gd.lat, gd.lon, gd.z, gd.w, gd.h, !!mapPrev.keepText);
 }
 
-/* 貼ってある地図を写真⇄線画で切り替える */
-function toggleMapLineArt(on) {
-  let hit = 0;
-  pageDraw.forEach(list => list.forEach(o => {
-    if (!o.__mapArea || o.__mapNote) return;
-    if (!o.__origEl) o.__origEl = o.getElement();
-    const photo = !!(o.__origEl.__attr && /写真/.test(o.__origEl.__attr));
-    const el2 = on ? lineArtCanvas(o.__origEl, mapPrev.laTh || (photo ? 60 : 30), photo) : o.__origEl;
-    o.setElement(el2);
-    o.dirty = true;
-    hit++;
-  }));
-  if (hit) {
-    state.mapOpacity = on ? 1 : 0.35;             // 線画は薄くする必要がない
-    pageDraw.forEach(list => list.forEach(o => { if (o.__mapArea && !o.__mapNote) o.set("opacity", state.mapOpacity); }));
+/* 貼ってある地図の見た目を切り替える */
+async function setPlacedMapMode(mode) {
+  const targets = [];
+  pageDraw.forEach(list => list.forEach(o => { if (o.__mapArea && !o.__mapNote) targets.push(o); }));
+  if (!targets.length) return;
+  busy(true, "作り直しています…");
+  try {
+    for (const o of targets) {
+      if (!o.__origEl) o.__origEl = o.getElement();
+      const orig = o.__origEl, gd = orig.__geo;
+      let el2 = orig;
+      if (mode === "edge") {
+        const photo = !!(orig.__attr && /写真/.test(orig.__attr));
+        el2 = lineArtCanvas(orig, mapPrev.laTh || (photo ? 60 : 30), photo);
+      } else if (mode === "outline" && gd) {
+        el2 = await buildOutlineCanvas(gd.lat, gd.lon, gd.z, gd.w, gd.h, !!mapPrev.keepText);
+      }
+      o.setElement(el2); o.dirty = true;
+    }
+    state.mapOpacity = (mode === "photo") ? 0.35 : 1;
+    targets.forEach(o => o.set("opacity", state.mapOpacity));
     canvas.requestRenderAll();
-    toast(on ? "地図を線画にしました" : "写真に戻しました");
-  }
+    toast(mode === "photo" ? "写真・地図に戻しました" : mode === "outline" ? "建物と道路の線だけにしました" : "輪郭抽出にしました");
+  } finally { busy(false); }
 }
+function toggleMapLineArt(on) { return setPlacedMapMode(on ? "edge" : "photo"); }
 
 async function commitMap() {
   const area = prevArea();
@@ -1661,7 +1785,7 @@ async function commitMap() {
     .forEach(o => { canvas.remove(o); pageDraw[area.page].splice(pageDraw[area.page].indexOf(o), 1); });
 
   // 枠の中心に中心を合わせて置き（回転の軸＝枠の中心）、枠でクリップする
-  if (mapPrev.lineArt) state.mapOpacity = 1;       // 線画は薄くしない
+  if (mapPrev.mode !== "photo") state.mapOpacity = 1;   // 線画は薄くしない
   const img = new fabric.Image(useCv, {
     left: R[0] + R[2] / 2, top: R[1] + R[3] / 2,
     originX: "center", originY: "center",
@@ -1679,7 +1803,7 @@ async function commitMap() {
   undoStack.push({ page: area.page, obj: img });
 
   // 出典とスケールは枠の内側に固定する（地図を動かしても付いて回らない）
-  const note = new fabric.Text(mapNoteText(mapPrev.canvas, R[2]), {
+  const note = new fabric.Text(mapNoteText(useCv, R[2]), {
     fontSize: P2C(4.6), fontFamily: '"Hiragino Sans",sans-serif',
     fill: "#333", backgroundColor: "rgba(255,255,255,.8)",
     originX: "right", originY: "bottom",
@@ -2473,28 +2597,40 @@ function mapPanel() {
     });
     nodes.push(nudge);
 
-    // 線画化（写真のぼやけを、道路・建物の輪郭線にする）
+    // 見た目：写真のまま／建物・道路の線だけ／輪郭抽出
+    const setMode = async (m) => {
+      mapPrev.mode = m;
+      if (m === "edge" && !mapPrev.laThSet) mapPrev.laTh = laDefaultTh(mapPrev.style);
+      if (m === "outline" && !mapPrev.outline) { busy(true, "建物と道路を取り出しています…"); await ensureOutline(); busy(false); }
+      renderSide();
+    };
     const laRow = el("div", { class: "chips sm" });
-    laRow.appendChild(el("button", { class: mapPrev.lineArt ? "" : "on", text: "写真のまま",
-      onclick: () => { mapPrev.lineArt = false; renderSide(); } }));
-    laRow.appendChild(el("button", { class: mapPrev.lineArt ? "on" : "", text: "線画にする",
-      onclick: () => { mapPrev.lineArt = true; if (!mapPrev.laThSet) mapPrev.laTh = laDefaultTh(mapPrev.style); renderSide(); } }));
-    const laLbl = el("label", { text: "線の拾い方 " + (mapPrev.laTh || laDefaultTh(mapPrev.style)) });
-    const laSl = el("input", { type: "range", min: "15", max: "140", step: "5" });
-    laSl.value = String(mapPrev.laTh || laDefaultTh(mapPrev.style)); laSl.style.width = "100%";
-    let laT = null;
-    laSl.addEventListener("input", () => {
-      mapPrev.laTh = parseInt(laSl.value, 10); mapPrev.laThSet = true;
-      laLbl.textContent = "線の拾い方 " + mapPrev.laTh;
-      clearTimeout(laT); laT = setTimeout(paintPreview, 120);
+    [["photo", "写真・地図のまま"], ["outline", "建物と道路の線だけ"], ["edge", "輪郭抽出（写真向け）"]].forEach(([m, t]) => {
+      laRow.appendChild(el("button", { class: (mapPrev.mode || "photo") === m ? "on" : "", text: t, onclick: () => setMode(m) }));
     });
-    nodes.push(el("div", { class: "f" }, [
-      el("label", { text: "見た目" }), laRow,
-      mapPrev.lineArt ? laLbl : null, mapPrev.lineArt ? laSl : null,
-      el("p", { class: "hint", text: mapPrev.lineArt
-        ? "左ほど細かい線まで拾い、右ほど太い輪郭だけになります。木や影が線になるときは右へ。"
-        : "「線画にする」で写真から道路・建物の輪郭だけを黒い線にします。記載例の手描き図に近い見た目になり、FAXでもつぶれません。" })
-    ]));
+    const extra = [];
+    if (mapPrev.mode === "outline") {
+      const kt = el("label", { class: "chk" });
+      const cb = el("input", { type: "checkbox" }); cb.checked = !!mapPrev.keepText;
+      cb.addEventListener("change", async () => { mapPrev.keepText = cb.checked; mapPrev.outline = null; busy(true, "作り直しています…"); await ensureOutline(); busy(false); paintPreview(); });
+      kt.appendChild(cb); kt.appendChild(document.createTextNode("地名などの文字も残す"));
+      extra.push(kt);
+      extra.push(el("p", { class: "hint", text: "標準地図の色分けから建物の外周だけを輪郭線にし、道路は細線で描きます。拡大前の解像度で処理するので線がぼやけません。" }));
+    } else if (mapPrev.mode === "edge") {
+      const laLbl = el("label", { text: "線の拾い方 " + (mapPrev.laTh || laDefaultTh(mapPrev.style)) });
+      const laSl = el("input", { type: "range", min: "15", max: "140", step: "5" });
+      laSl.value = String(mapPrev.laTh || laDefaultTh(mapPrev.style)); laSl.style.width = "100%";
+      let laT = null;
+      laSl.addEventListener("input", () => {
+        mapPrev.laTh = parseInt(laSl.value, 10); mapPrev.laThSet = true;
+        laLbl.textContent = "線の拾い方 " + mapPrev.laTh;
+        clearTimeout(laT); laT = setTimeout(paintPreview, 120);
+      });
+      extra.push(laLbl, laSl, el("p", { class: "hint", text: "左ほど細かい線まで拾い、右ほど太い輪郭だけになります。航空写真から輪郭を取るときに使います。" }));
+    } else {
+      extra.push(el("p", { class: "hint", text: "「建物と道路の線だけ」にすると、記載例のような線画になります（地図の種類に関わらず標準地図から作ります）。" }));
+    }
+    nodes.push(el("div", { class: "f" }, [el("label", { text: "見た目" }), laRow].concat(extra)));
 
     // 回転（道路や建物の向きを用紙に合わせたいとき）
     const rotRow = el("div", { class: "nudge" });
@@ -2537,10 +2673,11 @@ function mapPanel() {
   // 貼ったあとでも写真⇄線画を切り替えられる
   const placed = pageDraw.some(list => list.some(o => o.__mapArea && !o.__mapNote));
   if (placed) {
-    nodes.push(el("div", { class: "rowbtn" }, [
-      el("button", { class: "btn", text: "貼った地図を線画に", onclick: () => toggleMapLineArt(true) }),
-      el("button", { class: "btn", text: "貼った地図を写真に", onclick: () => toggleMapLineArt(false) })
-    ]));
+    const row = el("div", { class: "chips sm" });
+    [["photo", "元に戻す"], ["outline", "建物と道路の線に"], ["edge", "輪郭抽出に"]].forEach(([m, t]) => {
+      row.appendChild(el("button", { class: "", text: t, onclick: () => setPlacedMapMode(m) }));
+    });
+    nodes.push(el("div", { class: "f" }, [el("label", { text: "貼った地図の見た目を変える" }), row]));
   }
 
   const op = el("input", { type: "range", min: "10", max: "100", step: "5" });
@@ -2599,7 +2736,7 @@ function start() {
     get pageDraw() { return pageDraw; },
     drawField: drawField, setValue: setValue,
     buildMapCanvas: buildMapCanvas, TILE_SRC: TILE_SRC, spanMeters: spanMeters,
-    lineArtCanvas: lineArtCanvas
+    lineArtCanvas: lineArtCanvas, buildOutlineCanvas: buildOutlineCanvas
   };
   loadLocal();
   propagateLinks();

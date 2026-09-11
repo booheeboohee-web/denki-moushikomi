@@ -956,7 +956,7 @@ function drawField(f) {
         objs.push(new fabric.Text(txt.charAt(i), {
           fontSize: P2C(f.sz || 9),
           fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
-          fill: "#0b3d91", originX: "center", originY: "center",
+          fill: "#111", originX: "center", originY: "center",
           left: P2C(x0 + (i + 0.5) * pit), top: P2C(f.y + f.h / 2)
         }));
       }
@@ -970,7 +970,7 @@ function drawField(f) {
       width: R[2] - P2C(3),
       fontSize: P2C(f.sz || 10),
       fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
-      fill: "#0b3d91", textAlign: f.ac || "left",
+      fill: "#111", textAlign: f.ac || "left",
       splitByGrapheme: true, editable: false, lockRotation: true
     });
     let g = 0;
@@ -989,7 +989,7 @@ function drawField(f) {
     const o = new fabric.Text(String(v), {
       fontSize: P2C(f.sz || 10),
       fontFamily: '"Hiragino Sans","Noto Sans JP",sans-serif',
-      fill: "#0b3d91", editable: false, lockRotation: true
+      fill: "#111", editable: false, lockRotation: true
     });
     let g = 0;
     while ((o.width > maxW || o.height > maxH) && o.fontSize > 3 && g++ < 160) {
@@ -2403,8 +2403,8 @@ async function exportAll(kind) {
   state.calibrate = false;
   canvas.discardActiveObject();
 
-  // 記入方法の「黒ボールペン／黒インキで」に合わせ、出力時だけ記入文字と丸囲みを黒にする。
-  // 画面上は見分けやすいよう青・赤のまま。
+  // 記入方法の「黒ボールペン／黒インキで」に合わせ、出力時は丸囲み（画面では赤）も黒にする。
+  // 記入文字は画面でも黒。
   const recolor = [];
   Object.keys(fieldObj).forEach(id => [].concat(fieldObj[id]).forEach(o => {
     recolor.push({ o: o, fill: o.fill, stroke: o.stroke });

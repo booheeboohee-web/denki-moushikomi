@@ -1608,6 +1608,39 @@ function simplifyLine(pts, eps) {
   const outp = []; for (let i = 0; i < pts.length; i++) if (keep[i]) outp.push(pts[i]);
   return outp;
 }
+/* 切れた折れ線の端点を、進行方向が合っていればつなぐ（文字除去などで途切れた道路の補修） */
+function bridgeGaps(lines, maxDist, maxDeg) {
+  const ends = [];                                   // {li, at:"head"|"tail", p, dir}
+  lines.forEach((l, li) => {
+    if (l.length < 2) return;
+    const dirAt = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; return [dx / L, dy / L]; };
+    // 端点から少し内側の点で向きを取る（ノイズに強い）
+    const kH = Math.min(l.length - 1, 3), kT = Math.max(0, l.length - 1 - 3);
+    ends.push({ li, at: "head", p: l[0], dir: dirAt(l[kH], l[0]) });
+    ends.push({ li, at: "tail", p: l[l.length - 1], dir: dirAt(l[kT], l[l.length - 1]) });
+  });
+  const cos = Math.cos(maxDeg * Math.PI / 180);
+  const used = new Set();
+  const bridges = [];
+  for (let i = 0; i < ends.length; i++) {
+    if (used.has(i)) continue;
+    const a = ends[i];
+    let best = -1, bestD = Infinity;
+    for (let j = 0; j < ends.length; j++) {
+      if (j === i || used.has(j) || ends[j].li === a.li) continue;
+      const b = ends[j];
+      const vx = b.p[0] - a.p[0], vy = b.p[1] - a.p[1], d = Math.hypot(vx, vy);
+      if (d === 0 || d > maxDist) continue;
+      // a の進行方向に b があり、b の進行方向は a を向いている（＝一直線に続く）
+      if ((vx * a.dir[0] + vy * a.dir[1]) / d < cos) continue;
+      if ((-vx * b.dir[0] - vy * b.dir[1]) / d < cos) continue;
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    if (best >= 0) { used.add(i); used.add(best); bridges.push([a.p, ends[best].p]); }
+  }
+  return lines.concat(bridges);
+}
+
 function polyLen(pts) { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; }
 
 const outlineCache = { key: "", canvas: null };
@@ -1641,7 +1674,7 @@ async function buildOutlineCanvas(lat, lon, z, wPx, hPx, keepText) {
     const ii = new Int32Array((bw + 1) * (bh + 1));
     for (let y = 1; y <= bh; y++) { let row = 0;
       for (let x = 1; x <= bw; x++) { row += dark[(y - 1) * bw + (x - 1)]; ii[y * W1 + x] = ii[(y - 1) * W1 + x] + row; } }
-    const R2 = 3;
+    const R2 = 2;
     for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
       const j = y * bw + x; if (!gray[j]) continue;
       const x0 = Math.max(0, x - R2), y0 = Math.max(0, y - R2), x1 = Math.min(bw, x + R2 + 1), y1 = Math.min(bh, y + R2 + 1);
@@ -1679,13 +1712,15 @@ async function buildOutlineCanvas(lat, lon, z, wPx, hPx, keepText) {
   };
 
   // 川・水路：細線化→折れ線
-  const waterLines = skeletonToPolylines(thinMask(dilate1(water), bw, bh), bw, bh)
-    .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4);
+  const waterLines = bridgeGaps(
+    skeletonToPolylines(thinMask(dilate1(water), bw, bh), bw, bh)
+      .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4), 8, 35);
   strokeLines(waterLines, "#b5b5b5", Math.max(1.0, over * 0.4));
 
-  // 道路：細線化→折れ線→直線化。四角の集まりではなく、一定の太さの線として描く
-  const roadLines = skeletonToPolylines(thinMask(dilate1(road), bw, bh), bw, bh)
-    .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4);
+  // 道路：細線化→折れ線→直線化→途切れの橋渡し。四角の集まりではなく、一定の太さの線として描く
+  const roadLines = bridgeGaps(
+    skeletonToPolylines(thinMask(dilate1(road), bw, bh), bw, bh)
+      .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4), 8, 35);
   strokeLines(roadLines, "#6a6a6a", Math.max(1.1, over * 0.45));
 
   // 建物：マーチングスクエアで外周の線分を出し、つないで閉じた多角形にしてから直線化

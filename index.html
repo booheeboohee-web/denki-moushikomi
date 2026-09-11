@@ -710,7 +710,8 @@ function showPage(i) {
   });
   // このページの図面オブジェクト（地図・写真は最背面へ）
   pageDraw[i].forEach(o => canvas.add(o));
-  pageDraw[i].forEach(o => { if (o.__mapArea) canvas.sendToBack(o); });
+  pageDraw[i].forEach(o => { if (o.__mask) canvas.sendToBack(o); });
+  pageDraw[i].forEach(o => { if (o.__mapArea && !o.__mapNote) canvas.sendToBack(o); });   // 出典表記は地図の上に残す
   keepTextOnTop();
   renderTools();
   return new Promise((res) => {
@@ -995,7 +996,7 @@ const isTextObj = (o) => o && (o.type === "i-text" || o.type === "text" || o.typ
 
 /* 文字は常に一番手前に置く。線やスタンプの下に潜ると読めないし、タップで掴めなくなる。 */
 function keepTextOnTop() {
-  canvas.getObjects().forEach(o => { if (o.__draw && isTextObj(o)) canvas.bringToFront(o); });
+  canvas.getObjects().forEach(o => { if ((o.__draw || o.__mapNote) && isTextObj(o)) canvas.bringToFront(o); });
 }
 
 function addDrawObject(o) {
@@ -1004,12 +1005,16 @@ function addDrawObject(o) {
   canvas.add(o);
   pageDraw[state.page].push(o);
   undoStack.push({ page: state.page, obj: o });
+  if (o.__mask) {                               // 白マスクは地図のすぐ上、他の描き込みの下
+    canvas.sendToBack(o);
+    canvas.getObjects().forEach(m => { if (m.__mapArea && !m.__mapNote) canvas.sendToBack(m); });
+  }
   keepTextOnTop();
   canvas.setActiveObject(o);
   canvas.requestRenderAll();
 }
 
-const LINE_TOOLS = ["line", "zline", "dashline"];
+const LINE_TOOLS = ["line", "zline", "dashline", "grayline"];
 
 /* 引込線の記号：線の途中に「Z」の折れを入れる（記入方法p.4/p.10の使用区域図の記載例と同じ）。
    折れは線の 40%〜60% の区間に、線に直角な向きで入れる。 */
@@ -1036,6 +1041,10 @@ function makeLineObj(kind, x1, y1, x2, y2) {
   if (kind === "dashline") {
     // 一点鎖線（配電線・道路沿いの電力線）
     return new fabric.Line([x1, y1, x2, y2], Object.assign({ strokeDashArray: [18, 7, 4, 7] }, common));
+  }
+  if (kind === "grayline") {
+    // 補助線：線画の道路線と同じ色・太さ。途切れた道路の継ぎ足しや、地図に無い道の追記用
+    return new fabric.Line([x1, y1, x2, y2], Object.assign({}, common, { stroke: "#6a6a6a", strokeWidth: 1.7 }));
   }
   return new fabric.Line([x1, y1, x2, y2], common);
 }
@@ -1157,6 +1166,9 @@ const STAMPS = [
   { id:"wire",     label:"配線種類", glyph:"CV", make: () => {
       const t = prompt("配線の種類（例 CV22-3c / DV2.6×2 / CVT60-3c）", "CV22-3c");
       return t === null ? null : stampNote(t); } },
+  { id:"rect",     label:"四角",     glyph:"□", make: () => stampRect() },
+  { id:"maskRect", label:"白で隠す（四角）", glyph:"▢", make: () => stampMask("rect") },
+  { id:"maskOval", label:"白で隠す（丸）",   glyph:"◯", make: () => stampMask("oval") },
   { id:"earth",    label:"D種接地",  glyph:"⏚", make: () => stampEarth() },
   { id:"house",    label:"建物（屋根）", glyph:"⌂", make: () => stampHouse() },
   { id:"tatemono", label:"建物外枠", glyph:"▭", make: () => stampBuilding() },
@@ -1221,6 +1233,12 @@ function stampHouse() {
     L( w/2, -h/2,  rw/2, 0), L( w/2, h/2,  rw/2, 0)
   ], { originX: "center", originY: "center" });
 }
+/* ただの四角（塗りなし）：敷地・設備・任意の枠に */
+function stampRect() {
+  const w = 70 * K, h = 48 * K;
+  return new fabric.Rect({ width: w, height: h, fill: "rgba(255,255,255,0)", stroke: "#111", strokeWidth: 2.4,
+                           originX: "center", originY: "center" });
+}
 function stampBuilding() {
   const w = 110 * K, h = 78 * K;
   return new fabric.Rect({
@@ -1250,6 +1268,15 @@ function stampLoad(txt) {
     new fabric.Text(lines, { fontSize: 7.5*K, fontFamily:'"Hiragino Sans",sans-serif', fill:"#111",
                         originX:"center", originY:"center", left:0, top:0, textAlign:"center", lineHeight:1.05 })
   ], { originX:"center", originY:"center" });
+}
+/* 白で隠す：地図の余計な情報（文字の跡など）を覆う。画面上は薄い点線で位置が分かり、
+   出力時は点線を消して真っ白にする（exportAll 側で処理）。 */
+function stampMask(kind) {
+  const w = 60 * K, h = 40 * K;
+  const common = { fill: "#fff", stroke: "#c4c4c4", strokeWidth: 1.5, strokeDashArray: [6, 4],
+                   originX: "center", originY: "center", __mask: true };
+  if (kind === "oval") return new fabric.Ellipse(Object.assign({ rx: w / 2, ry: h / 2 }, common));
+  return new fabric.Rect(Object.assign({ width: w, height: h }, common));
 }
 function stampNote(txt) {
   return new fabric.IText(txt, {
@@ -1722,6 +1749,66 @@ async function buildOutlineCanvas(lat, lon, z, wPx, hPx, keepText) {
     skeletonToPolylines(thinMask(dilate1(road), bw, bh), bw, bh)
       .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4), 8, 35);
   strokeLines(roadLines, "#6a6a6a", Math.max(1.1, over * 0.45));
+
+  // 文字が建物を横切っている箇所を復元する。
+  // 文字（黒）とその白い縁取りの周囲＝「文字ゾーン」に限って、建物を膨らませて縮める（クロージング）。
+  // ゾーン外には触らないので、隣り合う建物どうしがくっつくことはない。
+  {
+    const R = 3;
+    const boxDil = (m) => {
+      const o = new Uint8Array(bw * bh);
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        if (!m[y * bw + x]) continue;
+        for (let dy = -R; dy <= R; dy++) { const yy = y + dy; if (yy < 0 || yy >= bh) continue;
+          for (let dx = -R; dx <= R; dx++) { const xx = x + dx; if (xx < 0 || xx >= bw) continue; o[yy * bw + xx] = 1; } }
+      }
+      return o;
+    };
+    const boxEro = (m) => {
+      const o = new Uint8Array(bw * bh);
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        let ok = 1;
+        for (let dy = -R; dy <= R && ok; dy++) { const yy = y + dy; if (yy < 0 || yy >= bh) { ok = 0; break; }
+          for (let dx = -R; dx <= R; dx++) { const xx = x + dx; if (xx < 0 || xx >= bw || !m[yy * bw + xx]) { ok = 0; break; } } }
+        o[y * bw + x] = ok;
+      }
+      return o;
+    };
+    const zone = boxDil(dark);                       // 文字の周囲
+    const closed = boxEro(boxDil(bld));              // 建物のクロージング
+    for (let j = 0; j < bw * bh; j++) if (zone[j] && closed[j]) bld[j] = 1;
+  }
+
+  // 建物の塗りの中にある小さな穴（地名の白い縁取りや文字が塗りに重なった跡）を埋める。
+  // 埋めないと、穴の縁が文字の形の「ぐにゃぐにゃ」として輪郭に出てしまう。
+  // 画像の外周から届かない非建物領域＝閉じ込められた穴。中庭のような大きな穴は残す。
+  {
+    const reach = new Uint8Array(bw * bh);          // 外周から到達できる非建物画素
+    const stack = [];
+    const push = (i) => { if (!bld[i] && !reach[i]) { reach[i] = 1; stack.push(i); } };
+    for (let x = 0; x < bw; x++) { push(x); push((bh - 1) * bw + x); }
+    for (let y = 0; y < bh; y++) { push(y * bw); push(y * bw + bw - 1); }
+    while (stack.length) {
+      const i = stack.pop(), x = i % bw, y = (i - x) / bw;
+      if (x > 0) push(i - 1); if (x < bw - 1) push(i + 1);
+      if (y > 0) push(i - bw); if (y < bh - 1) push(i + bw);
+    }
+    // 到達できない非建物画素を連結成分ごとに集め、小さいものだけ埋める
+    const seen = new Uint8Array(bw * bh);
+    const MAX_HOLE = 600;                            // 元解像度で約24×24px（z18で約11m四方）まで
+    for (let i0 = 0; i0 < bw * bh; i0++) {
+      if (bld[i0] || reach[i0] || seen[i0]) continue;
+      const comp = [i0]; seen[i0] = 1;
+      for (let k = 0; k < comp.length && comp.length <= MAX_HOLE + 1; k++) {
+        const i = comp[k], x = i % bw, y = (i - x) / bw;
+        const nb = [];
+        if (x > 0) nb.push(i - 1); if (x < bw - 1) nb.push(i + 1);
+        if (y > 0) nb.push(i - bw); if (y < bh - 1) nb.push(i + bw);
+        for (const j of nb) if (!bld[j] && !reach[j] && !seen[j]) { seen[j] = 1; comp.push(j); }
+      }
+      if (comp.length <= MAX_HOLE) for (const j of comp) bld[j] = 1;
+    }
+  }
 
   // 建物：マーチングスクエアで外周の線分を出し、つないで閉じた多角形にしてから直線化
   const segs = [];
@@ -2198,6 +2285,10 @@ async function exportAll(kind) {
     if (o.type === "ellipse") o.set({ stroke: "#111" });
     else o.set({ fill: "#111" });
   }));
+  // 白マスクの目印の点線は出力しない
+  pageDraw.forEach(list => list.forEach(o => {
+    if (o.__mask) { recolor.push({ o: o, fill: o.fill, stroke: o.stroke }); o.set({ stroke: "" }); }
+  }));
   try {
     const shots = [];
     for (let i = 0; i < pageBg.length; i++) {
@@ -2289,7 +2380,7 @@ function renderSteps() {
 function renderTools() {
   const box = $("#tools"); box.innerHTML = "";
   const g1 = el("div", { class: "grp" });
-  [["pan", "移動"], ["select", "選択"], ["text", "文字"], ["pen", "ペン"], ["line", "直線"], ["zline", "引込線(Z)"], ["dashline", "電力線(‑·‑)"]].forEach(([k, t]) => {
+  [["pan", "移動"], ["select", "選択"], ["text", "文字"], ["pen", "ペン"], ["line", "直線"], ["grayline", "補助線(灰)"], ["zline", "引込線(Z)"], ["dashline", "電力線(‑·‑)"]].forEach(([k, t]) => {
     g1.appendChild(el("button", {
       class: state.tool === k ? "on" : "", text: t,
       onclick: () => {

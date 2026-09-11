@@ -1440,21 +1440,35 @@ function placeSldTemplate(areaId, o) {
   toast("記載例どおりに配置しました（分岐" + n + "回路）。個別に動かせます");
 }
 
+/* スタンプを置く位置：
+   1) 「拡大」で枠を選んでいればその枠の中央
+   2) そうでなければ、いま画面に見えている範囲の中央（右半分を見ていれば右半分に出る）
+   ページの最初の枠に決め打ちすると、右の枠を見ているのに左に出てしまう。 */
+function placeTarget() {
+  if (state.zoomedArea) {
+    const a = FORM.areas.find(x => x.id === state.zoomedArea && x.page === state.page);
+    if (a) return { x: P2C(a.rect[0] + a.rect[2] / 2), y: P2C(a.rect[1] + a.rect[3] / 2), area: a };
+  }
+  const stage = $("#stage"), wrap = $("#cwrap"), z = state.zoom || 1;
+  const sr = stage.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  const cx = Math.max(0, Math.min(canvas.getWidth(),  (sr.left + stage.clientWidth  / 2 - wr.left) / z));
+  const cy = Math.max(0, Math.min(canvas.getHeight(), (sr.top  + stage.clientHeight / 2 - wr.top)  / z));
+  // 画面中央がどれかの枠の中なら、その枠を「作業中の枠」とみなす
+  const inside = FORM.areas.find(a => a.page === state.page &&
+    cx >= P2C(a.rect[0]) && cx <= P2C(a.rect[0] + a.rect[2]) && cy >= P2C(a.rect[1]) && cy <= P2C(a.rect[1] + a.rect[3]));
+  return { x: cx, y: cy, area: inside || null };
+}
+
 function placeStamp(def) {
   const o = def.make();
   if (!o) return;
   autoLockMap();
-  // 現在のページの主要エリア中央、なければ画面中央
-  const area = FORM.areas.find(a => a.page === state.page);
-  let cx = canvas.getWidth() / 2, cy = canvas.getHeight() / 2;
-  if (area) {
-    cx = P2C(area.rect[0] + area.rect[2] / 2);
-    cy = P2C(area.rect[1] + area.rect[3] / 2);
-  }
-  o.set({ left: cx, top: cy, originX:"center", originY:"center" });
+  const t = placeTarget();
+  o.set({ left: t.x, top: t.y, originX: "center", originY: "center" });
   o.setCoords();
   addDrawObject(o);
-  if (area && state.zoomedArea !== area.id) zoomToArea(area.id);
+  // 枠の中に置いたが、まだその枠に拡大していないときだけ拡大する
+  if (t.area && state.zoomedArea !== t.area.id && !state.zoomedArea) zoomToArea(t.area.id);
   toast(def.label + " を置きました（ドラッグで移動）");
 }
 

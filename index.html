@@ -2112,7 +2112,13 @@ async function setPlacedMapMode(mode) {
   try {
     for (const o of targets) {
       if (!o.__origEl) o.__origEl = o.getElement();
-      const orig = o.__origEl, gd = orig.__geo;
+      const gd = o.__geo || o.__origEl.__geo;
+      // 元の写真・地図：手元に無ければ（読込直後など）位置情報から取り直す
+      let orig = o.__origEl;
+      if (!(orig.__attr) && gd) {
+        orig = await buildMapCanvas(gd.lat, gd.lon, gd.z, gd.w, gd.h, gd.style || state.mapStyle);
+        o.__origEl = orig;
+      }
       let el2 = orig;
       if (mode === "edge") {
         const photo = !!(orig.__attr && /写真/.test(orig.__attr));
@@ -2120,7 +2126,7 @@ async function setPlacedMapMode(mode) {
       } else if (mode === "outline" && gd) {
         el2 = await buildOutlineCanvas(gd.lat, gd.lon, gd.z, gd.w, gd.h, !!mapPrev.keepText);
       }
-      o.setElement(el2); o.dirty = true;
+      o.setElement(el2); o.dirty = true; o.__mapMode = mode;
     }
     state.mapOpacity = (mode === "photo") ? 0.35 : 1;
     targets.forEach(o => o.set("opacity", state.mapOpacity));
@@ -2150,6 +2156,8 @@ async function commitMap() {
     opacity: state.mapOpacity, __mapArea: area.id
   });
   img.__origEl = mapPrev.canvas;                    // あとで写真に戻せるように
+  img.__geo = mapPrev.canvas.__geo;                 // 元の地図種類（写真など）の位置情報。読込後の「元に戻す」に使う
+  img.__mapMode = mapPrev.mode || "photo";
   img.set("clipPath", new fabric.Rect({
     left: R[0], top: R[1], width: R[2], height: R[3],
     absolutePositioned: true, originX: "left", originY: "top"
@@ -2157,7 +2165,6 @@ async function commitMap() {
   canvas.add(img);
   canvas.sendToBack(img);
   pageDraw[area.page].push(img);
-  undoStack.push({ page: area.page, obj: img });
 
   // 出典とスケールは枠の内側に固定する（地図を動かしても付いて回らない）
   const note = new fabric.Text(mapNoteText(useCv, R[2]), {
@@ -2170,6 +2177,7 @@ async function commitMap() {
   });
   canvas.add(note);
   pageDraw[area.page].push(note);
+  undoStack.push({ page: area.page, obj: [img, note] });   // 地図と出典は1手で戻す
 
   if (state.page !== area.page) await showPage(area.page);
   // 地図は貼ったら固定。動かしたいときだけツールバーの「地図」で解除する。
@@ -2300,7 +2308,10 @@ function downloadBlob(blob, name) {
 }
 
 function projectJSON() {
-  const draw = pageDraw.map(list => list.map(o => o.toJSON(["__draw", "__mapArea"])));
+  // 独自プロパティ（地図・出典・白マスク・地図の位置情報）も書き出す。
+  // 抜けると読込後に地図が動かせる状態になったり、マスクが普通の図形扱いになる。
+  const PROPS = ["__draw", "__mapArea", "__mapNote", "__mask", "__geo", "__mapMode", "absolutePositioned"];
+  const draw = pageDraw.map(list => list.map(o => o.toJSON(PROPS)));
   return JSON.stringify({
     v: 1, form: FORM.id, savedAt: new Date().toISOString(),
     values: state.values, draw: draw,
@@ -2333,7 +2344,20 @@ function loadProject(file) {
       if (!list || !list.length || pi >= pageBg.length) return;
       pending++;
       fabric.util.enlivenObjects(list, (objs) => {
-        objs.forEach(o => pageDraw[pi].push(o));
+        objs.forEach(o => {
+          // 保存されない状態を復元する
+          if (o.__mapArea && !o.__mapNote) {
+            o.set({ selectable: false, evented: false, hasControls: false, hasBorders: false });
+            if (o.clipPath) o.clipPath.absolutePositioned = true;
+            o.__origEl = o.getElement();
+          } else if (o.__mapNote) {
+            o.set({ selectable: false, evented: false });
+          } else {
+            o.set({ selectable: state.tool === "select" });
+            if (isTextObj(o)) o.set({ padding: 8 });
+          }
+          pageDraw[pi].push(o);
+        });
         if (--pending === 0 && done) finish();
       });
     });
@@ -2574,13 +2598,18 @@ function undo() {
       if (u.page === state.page) canvas.remove(ob);
     });
     canvas.requestRenderAll();
+    if (!hasPlacedMap()) mapUnlocked = false;
+    renderTools();
     return;
   }
   toast("戻せる操作がありません");
 }
 function delSelected() {
-  const objs = canvas.getActiveObjects();
+  let objs = canvas.getActiveObjects();
   if (!objs.length) { toast("削除するものを選んでください"); return; }
+  // 地図を消すときは、その出典表記も一緒に消す
+  const arr0 = pageDraw[state.page];
+  objs.forEach(o => { if (o.__mapArea && !o.__mapNote) arr0.forEach(n => { if (n.__mapNote && n.__mapArea === o.__mapArea && objs.indexOf(n) < 0) objs = objs.concat([n]); }); });
   objs.forEach(o => {
     canvas.remove(o);
     const arr = pageDraw[state.page];
@@ -2589,6 +2618,8 @@ function delSelected() {
   });
   canvas.discardActiveObject();
   canvas.requestRenderAll();
+  if (!hasPlacedMap()) mapUnlocked = false;
+  renderTools();                                  // 「地図：固定」などの表示を更新
 }
 
 /* ---------- 入力パネル ---------- */

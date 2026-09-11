@@ -1348,12 +1348,12 @@ function stampLoad(txt) {
                         originX:"center", originY:"center", left:0, top:0, textAlign:"center", lineHeight:1.05 })
   ], { originX:"center", originY:"center" });
 }
-/* 白で隠す：地図の余計な情報（文字の跡など）を覆う。画面上は薄い点線で位置が分かり、
-   出力時は点線を消して真っ白にする（exportAll 側で処理）。 */
+/* 白で隠す：地図の余計な情報（文字の跡など）を覆う。枠線は付けない（画面でも出力でも真っ白）。
+   位置は、タップして選択すると出る選択枠で分かる。 */
 function stampMask(kind) {
   const w = 60 * K, h = 40 * K;
-  const common = { fill: "#fff", stroke: "#c4c4c4", strokeWidth: 1.5, strokeDashArray: [6, 4],
-                   originX: "center", originY: "center", __mask: true };
+  const common = { fill: "#fff", stroke: "", strokeWidth: 0,
+                   originX: "center", originY: "center", __mask: true, padding: 4 };
   if (kind === "oval") return new fabric.Ellipse(Object.assign({ rx: w / 2, ry: h / 2 }, common));
   return new fabric.Rect(Object.assign({ width: w, height: h }, common));
 }
@@ -2352,6 +2352,8 @@ function loadProject(file) {
             o.__origEl = o.getElement();
           } else if (o.__mapNote) {
             o.set({ selectable: false, evented: false });
+          } else if (o.__mask) {
+            o.set({ stroke: "", strokeWidth: 0, strokeDashArray: null, selectable: state.tool === "select" });
           } else {
             o.set({ selectable: state.tool === "select" });
             if (isTextObj(o)) o.set({ padding: 8 });

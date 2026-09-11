@@ -1471,6 +1471,145 @@ async function buildMapCanvas(lat, lon, z, wPx, hPx, style) {
      文字 → グレー画素の密度が高い塊として除く（任意で残せる）
    拡大してから輪郭を取るのではないので、線がぼやけない。
    ------------------------------------------------------------ */
+/* ---- 線画化のための幾何ヘルパー ---- */
+/* Zhang-Suen 細線化：1画素幅の中心線にする */
+function thinMask(mask, w, h) {
+  const m = new Uint8Array(mask);
+  let changed = true, guard = 0;
+  while (changed && guard++ < 200) {
+    changed = false;
+    for (let pass = 0; pass < 2; pass++) {
+      const del = [];
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x; if (!m[i]) continue;
+        const p2 = m[i - w], p3 = m[i - w + 1], p4 = m[i + 1], p5 = m[i + w + 1],
+              p6 = m[i + w], p7 = m[i + w - 1], p8 = m[i - 1], p9 = m[i - w - 1];
+        const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+        if (B < 2 || B > 6) continue;
+        let A = 0;
+        const q = [p2, p3, p4, p5, p6, p7, p8, p9, p2];
+        for (let k = 0; k < 8; k++) if (q[k] === 0 && q[k + 1] === 1) A++;
+        if (A !== 1) continue;
+        if (pass === 0) { if (p2 * p4 * p6 !== 0 || p4 * p6 * p8 !== 0) continue; }
+        else            { if (p2 * p4 * p8 !== 0 || p2 * p6 * p8 !== 0) continue; }
+        del.push(i);
+      }
+      if (del.length) { changed = true; for (const i of del) m[i] = 0; }
+    }
+  }
+  return m;
+}
+/* 細線化した画素列を折れ線に分解する（端点・分岐点で区切る） */
+function skeletonToPolylines(sk, w, h) {
+  const NB = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+  const deg = new Uint8Array(w * h);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x; if (!sk[i]) continue;
+    let n = 0; for (const [dx, dy] of NB) if (sk[(y + dy) * w + (x + dx)]) n++;
+    deg[i] = n;
+  }
+  const used = new Uint8Array(w * h);          // 通過済み（次数2の画素）
+  const edgeDone = new Set();                  // 隣接する節点同士の重複防止
+  const lines = [];
+  const walk = (sx, sy, nx, ny) => {
+    const pts = [[sx, sy]];
+    let px = sx, py = sy, cx = nx, cy = ny, guard = 0;
+    while (guard++ < 100000) {
+      pts.push([cx, cy]);
+      const ci = cy * w + cx;
+      if (deg[ci] !== 2) break;                // 節点に着いた
+      used[ci] = 1;
+      let found = null;
+      for (const [dx, dy] of NB) {
+        const qx = cx + dx, qy = cy + dy;
+        if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+        const qi = qy * w + qx;
+        if (!sk[qi] || (qx === px && qy === py)) continue;
+        if (deg[qi] === 2 && used[qi]) continue;
+        found = [qx, qy]; break;
+      }
+      if (!found) break;
+      px = cx; py = cy; cx = found[0]; cy = found[1];
+    }
+    return pts;
+  };
+  // 節点（端点・分岐）から出発
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x; if (!sk[i] || deg[i] === 2 || deg[i] === 0) continue;
+    for (const [dx, dy] of NB) {
+      const qx = x + dx, qy = y + dy, qi = qy * w + qx;
+      if (!sk[qi]) continue;
+      if (deg[qi] === 2 && used[qi]) continue;
+      const ek = Math.min(i, qi) + ":" + Math.max(i, qi);
+      if (edgeDone.has(ek)) continue;
+      edgeDone.add(ek);
+      lines.push(walk(x, y, qx, qy));
+    }
+  }
+  // 残り（節点のない閉じた輪）
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x; if (!sk[i] || deg[i] !== 2 || used[i]) continue;
+    let nx = -1, ny = -1;
+    for (const [dx, dy] of NB) { if (sk[(y + dy) * w + (x + dx)]) { nx = x + dx; ny = y + dy; break; } }
+    if (nx < 0) continue;
+    used[i] = 1;
+    const l = walk(x, y, nx, ny); l.push([x, y]); lines.push(l);
+  }
+  return lines;
+}
+/* マーチングスクエアの線分を端点でつないで閉路にする */
+function segmentsToLoops(segs) {
+  const key = (x, y) => Math.round(x * 2) + "," + Math.round(y * 2);
+  const adj = new Map();
+  segs.forEach((s, i) => {
+    for (const k of [key(s[0], s[1]), key(s[2], s[3])]) { if (!adj.has(k)) adj.set(k, []); adj.get(k).push(i); }
+  });
+  const used = new Uint8Array(segs.length);
+  const loops = [];
+  for (let i = 0; i < segs.length; i++) {
+    if (used[i]) continue;
+    used[i] = 1;
+    const pts = [[segs[i][0], segs[i][1]], [segs[i][2], segs[i][3]]];
+    const startKey = key(segs[i][0], segs[i][1]);
+    let cur = key(segs[i][2], segs[i][3]), guard = 0;
+    while (cur !== startKey && guard++ < 200000) {
+      const list = adj.get(cur) || [];
+      let nxt = -1;
+      for (const j of list) if (!used[j]) { nxt = j; break; }
+      if (nxt < 0) break;
+      used[nxt] = 1;
+      const sg = segs[nxt];
+      const p = (key(sg[0], sg[1]) === cur) ? [sg[2], sg[3]] : [sg[0], sg[1]];
+      pts.push(p); cur = key(p[0], p[1]);
+    }
+    loops.push(pts);
+  }
+  return loops;
+}
+/* Douglas-Peucker：階段状の点列をまっすぐな辺に減らす */
+function simplifyLine(pts, eps) {
+  if (pts.length < 3) return pts;
+  const sq = eps * eps;
+  const keep = new Uint8Array(pts.length); keep[0] = 1; keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const ax = pts[a][0], ay = pts[a][1], dx = pts[b][0] - ax, dy = pts[b][1] - ay, L2 = dx * dx + dy * dy;
+    let maxD = 0, idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const px = pts[i][0] - ax, py = pts[i][1] - ay;
+      let d2;
+      if (L2 === 0) d2 = px * px + py * py;
+      else { const t = Math.max(0, Math.min(1, (px * dx + py * dy) / L2)); const ex = px - t * dx, ey = py - t * dy; d2 = ex * ex + ey * ey; }
+      if (d2 > maxD) { maxD = d2; idx = i; }
+    }
+    if (maxD > sq && idx > 0) { keep[idx] = 1; stack.push([a, idx], [idx, b]); }
+  }
+  const outp = []; for (let i = 0; i < pts.length; i++) if (keep[i]) outp.push(pts[i]);
+  return outp;
+}
+function polyLen(pts) { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; }
+
 const outlineCache = { key: "", canvas: null };
 
 async function buildOutlineCanvas(lat, lon, z, wPx, hPx, keepText) {
@@ -1515,46 +1654,63 @@ async function buildOutlineCanvas(lat, lon, z, wPx, hPx, keepText) {
   out.width = Math.round(wPx); out.height = Math.round(hPx);
   const g = out.getContext("2d");
   g.fillStyle = "#fff"; g.fillRect(0, 0, out.width, out.height);
+  g.lineCap = "round"; g.lineJoin = "round";
 
-  // 水路・川：薄いグレーの線
-  g.fillStyle = "#b0b0b0";
-  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) if (water[y * bw + x]) g.fillRect(x * over, y * over, over, over);
+  // 折れ線を拡大後の座標で描く
+  const strokeLines = (lines, color, width) => {
+    g.strokeStyle = color; g.lineWidth = width;
+    g.beginPath();
+    lines.forEach(pts => {
+      if (pts.length < 2) return;
+      g.moveTo(pts[0][0] * over, pts[0][1] * over);
+      for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0] * over, pts[i][1] * over);
+    });
+    g.stroke();
+  };
 
-  // 道路：元の1画素を拡大率ぶんの四角で描く（小さく描くと隙間ができて点線に見える）。
-  // 元の道路線は1〜2画素なので、これで拡大後も細い線になる。色は建物より薄いグレー。
-  g.fillStyle = "#6a6a6a";
-  for (let y = 0; y < bh; y++) {
-    let x = 0;
-    while (x < bw) {                                 // 横に連続する画素はまとめて1本で描く
-      if (!road[y * bw + x]) { x++; continue; }
-      let x2 = x; while (x2 + 1 < bw && road[y * bw + x2 + 1]) x2++;
-      g.fillRect(x * over, y * over, (x2 - x + 1) * over, over);
-      x = x2 + 1;
+  // 細線化の前に1画素太らせて、アンチエイリアスで欠けた隙間をつなぐ
+  const dilate1 = (m) => {
+    const o = new Uint8Array(m);
+    for (let y = 1; y < bh - 1; y++) for (let x = 1; x < bw - 1; x++) {
+      const i = y * bw + x;
+      if (m[i] || m[i - 1] || m[i + 1] || m[i - bw] || m[i + bw]) o[i] = 1;
     }
-  }
+    return o;
+  };
 
-  // 建物の外周：マーチングスクエアで線分にして、拡大後の解像度で描く
-  g.strokeStyle = "#222"; g.lineWidth = Math.max(1.2, over * 0.55); g.lineCap = "round";
-  g.beginPath();
+  // 川・水路：細線化→折れ線
+  const waterLines = skeletonToPolylines(thinMask(dilate1(water), bw, bh), bw, bh)
+    .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4);
+  strokeLines(waterLines, "#b5b5b5", Math.max(1.0, over * 0.4));
+
+  // 道路：細線化→折れ線→直線化。四角の集まりではなく、一定の太さの線として描く
+  const roadLines = skeletonToPolylines(thinMask(dilate1(road), bw, bh), bw, bh)
+    .map(l => simplifyLine(l, 0.9)).filter(l => l.length >= 2 && polyLen(l) >= 4);
+  strokeLines(roadLines, "#6a6a6a", Math.max(1.1, over * 0.45));
+
+  // 建物：マーチングスクエアで外周の線分を出し、つないで閉じた多角形にしてから直線化
+  const segs = [];
   const at = (x, y) => (x < 0 || y < 0 || x >= bw || y >= bh) ? 0 : bld[y * bw + x];
-  const seg = (x1, y1, x2, y2) => { g.moveTo(x1 * over, y1 * over); g.lineTo(x2 * over, y2 * over); };
   for (let y = -1; y < bh; y++) for (let x = -1; x < bw; x++) {
     const c = at(x, y) | (at(x + 1, y) << 1) | (at(x + 1, y + 1) << 2) | (at(x, y + 1) << 3);
     if (c === 0 || c === 15) continue;
     const cx = x + 1, cy = y + 1;                                    // 画素中心の格子
     const T = [cx, cy - 0.5], Rr = [cx + 0.5, cy], B = [cx, cy + 0.5], L = [cx - 0.5, cy];
+    const S = (p, q) => segs.push([p[0], p[1], q[0], q[1]]);
     switch (c) {
-      case 1: case 14: seg(L[0], L[1], T[0], T[1]); break;
-      case 2: case 13: seg(T[0], T[1], Rr[0], Rr[1]); break;
-      case 3: case 12: seg(L[0], L[1], Rr[0], Rr[1]); break;
-      case 4: case 11: seg(Rr[0], Rr[1], B[0], B[1]); break;
-      case 5:          seg(L[0], L[1], T[0], T[1]); seg(Rr[0], Rr[1], B[0], B[1]); break;
-      case 6: case 9:  seg(T[0], T[1], B[0], B[1]); break;
-      case 7: case 8:  seg(L[0], L[1], B[0], B[1]); break;
-      case 10:         seg(T[0], T[1], Rr[0], Rr[1]); seg(L[0], L[1], B[0], B[1]); break;
+      case 1: case 14: S(L, T); break;
+      case 2: case 13: S(T, Rr); break;
+      case 3: case 12: S(L, Rr); break;
+      case 4: case 11: S(Rr, B); break;
+      case 5:          S(L, T); S(Rr, B); break;
+      case 6: case 9:  S(T, B); break;
+      case 7: case 8:  S(L, B); break;
+      case 10:         S(T, Rr); S(L, B); break;
     }
   }
-  g.stroke();
+  const loops = segmentsToLoops(segs).map(l => simplifyLine(l, 0.8))
+    .filter(l => l.length >= 4 && polyLen(l) >= 8);                 // 小さなゴミは捨てる
+  strokeLines(loops, "#222", Math.max(1.2, over * 0.5));
 
   out.__attr = "地理院タイル（標準地図）を線画化";
   out.__mPerPx = spanMeters(lat, z, 1);

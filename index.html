@@ -88,10 +88,25 @@ header .sp{flex:0 1 0;min-width:0}
 #side{
   flex:0 0 380px;background:var(--panel);border-left:1px solid var(--line);
   overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 60px;
+  min-width:0;min-height:0;
 }
+/* 仕切り：横並びのときは縦のバー、縦並び（iPad縦・スマホ）のときは横のシャッター */
+#splitter{
+  flex:0 0 14px;background:#e6e9ee;border-left:1px solid var(--line);border-right:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;cursor:col-resize;
+  touch-action:none;user-select:none;-webkit-user-select:none;z-index:3
+}
+#splitter .grip{width:4px;height:44px;border-radius:2px;background:#9aa4b2}
+#splitter:active,#splitter.on{background:#cfe0f3}
+#side.collapsed{flex-basis:0 !important;padding:0;border:none;overflow:hidden}
 @media (max-width:1000px){
   #main{flex-direction:column}
   #side{flex:0 0 46%;border-left:none;border-top:1px solid var(--line)}
+  #splitter{
+    flex:0 0 22px;cursor:row-resize;border-left:none;border-right:none;
+    border-top:1px solid var(--line);border-bottom:1px solid var(--line)
+  }
+  #splitter .grip{width:56px;height:5px;border-radius:3px}
 }
 
 /* ---------- toolbar over canvas ---------- */
@@ -214,6 +229,7 @@ table.cal td:first-child{color:var(--sub)}
         <div id="stageInner"><div id="cwrap"><canvas id="cv"></canvas></div></div>
       </div>
     </div>
+    <div id="splitter" title="ドラッグで広さを変える／ダブルタップでたたむ"><div class="grip"></div></div>
     <div id="side"></div>
   </div>
 </div>
@@ -694,6 +710,7 @@ function initCanvas() {
   setupTextTool();
   setupCalibrateTool();
   setupPan();
+  setupSplitter();
   setupPinch();
   fitZoom();
 }
@@ -722,6 +739,68 @@ function showPage(i) {
       });
     });
   });
+}
+
+/* パネルとキャンバスの仕切り。ドラッグで広さを変え、ダブルタップでたたむ。 */
+function setupSplitter() {
+  const sp = $("#splitter"), side = $("#side"), main = $("#main");
+  const isCol = () => getComputedStyle(main).flexDirection === "column";
+  const KEY = () => "denki-side-" + (isCol() ? "h" : "w");
+  const apply = (px) => {
+    const total = isCol() ? main.clientHeight : main.clientWidth;
+    const v = Math.max(0, Math.min(total - 120, px));
+    side.classList.toggle("collapsed", v < 40);
+    side.style.flexBasis = (v < 40 ? 0 : v) + "px";
+    try { localStorage.setItem(KEY(), String(v)); } catch (e) {}
+  };
+  const restore = () => {
+    let v = null;
+    try { v = parseFloat(localStorage.getItem(KEY())); } catch (e) {}
+    if (v != null && !isNaN(v)) apply(v);
+    else { side.classList.remove("collapsed"); side.style.flexBasis = ""; }
+  };
+  let drag = null, moved = false;
+  sp.addEventListener("pointerdown", (e) => {
+    sp.setPointerCapture(e.pointerId);
+    drag = { x: e.clientX, y: e.clientY, base: isCol() ? side.getBoundingClientRect().height : side.getBoundingClientRect().width };
+    moved = false;
+    sp.classList.add("on");
+    e.preventDefault();
+  });
+  sp.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 6) moved = true;
+    // 縦並び：上へ動かすとパネルが広がる。横並び：左へ動かすと広がる
+    const d = isCol() ? (drag.y - e.clientY) : (drag.x - e.clientX);
+    apply(drag.base + d);
+  });
+  const end = () => {
+    if (!drag) return;
+    drag = null; sp.classList.remove("on");
+    if (state.zoomedArea) zoomToArea(state.zoomedArea);   // 拡大中なら新しい広さに合わせ直す
+  };
+  sp.addEventListener("pointerup", end);
+  sp.addEventListener("pointercancel", end);
+  // ダブルタップ／ダブルクリックでたたむ⇄戻す（指を動かさない押し離しだけをタップと数える）
+  let lastTap = 0;
+  sp.addEventListener("pointerup", (e) => {
+    if (moved) { lastTap = 0; return; }
+    const now = Date.now();
+    if (now - lastTap < 350) {
+      const collapsed = side.classList.contains("collapsed");
+      let prev = null; try { prev = parseFloat(localStorage.getItem(KEY() + "-prev")); } catch (err) {}
+      if (collapsed) apply(prev && prev >= 40 ? prev : (isCol() ? main.clientHeight * 0.46 : 380));
+      else { try { localStorage.setItem(KEY() + "-prev", String(isCol() ? side.getBoundingClientRect().height : side.getBoundingClientRect().width)); } catch (err) {} apply(0); }
+      if (state.zoomedArea) setTimeout(() => zoomToArea(state.zoomedArea), 60);
+      lastTap = 0;
+    } else lastTap = now;
+  });
+  let lastCol = isCol();
+  window.addEventListener("resize", () => {
+    const c = isCol();
+    if (c !== lastCol) { lastCol = c; restore(); }
+  });
+  restore();
 }
 
 function fitZoom() {
